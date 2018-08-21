@@ -95,6 +95,9 @@ async def upstream_forward(url, data, conn):
 
 	# Await upstream response
 	async with conn.post(url, data=data) as response:
+		if response.status != 200:
+			print('%s (%d): IN %s, OUT %s' % (url, response.status, data, await response.read()))
+
 		return await response.read()
 
 
