@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import socket
+import asyncio
 import requests
 
 
@@ -11,30 +11,37 @@ headers = {'accept': 'application/dns-message', 'content-type': 'application/dns
 
 def main():
 	print('Starting UDP server listening on: %s#%d' % (host, port))
-	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-	sock.bind((host, port))
+
+	loop = asyncio.get_event_loop()
+	listen = loop.create_datagram_endpoint(DohProtocol, local_addr = (host, port))
+	transport, protocol = loop.run_until_complete(listen)
 
 	print('Connecting to upstream server: %s' % (upstreams[0]))
 
 	try:
-		while True:
-			# Accept requets from a client
-			data, addr = sock.recvfrom(576)
-
-			# Forward request to upstream server and get response
-			data = upstream_forward(upstreams[0], data)
-
-			# Send response to client
-			sock.sendto(data, addr)
-
+		loop.run_forever()
 	except (KeyboardInterrupt, SystemExit):
 		pass
 
-	sock.shutdown(socket.SHUT_RDWR)
-	sock.close()
+	transport.close()
+	loop.close()
 
 
-def upstream_forward(url, data):
+class DohProtocol:
+	def connection_made(self, transport):
+		self.loop = asyncio.get_event_loop()
+		self.transport = transport
+		self.upstream = upstreams[0]
+
+	def datagram_received(self, data, addr):
+		self.loop.create_task(self.forward_packet(data, addr))
+
+	async def forward_packet(self, data, addr):
+		data = await upstream_forward(self.upstream, self.conn, data)
+		self.transport.sendto(data, addr)
+
+
+async def upstream_forward(url, data):
 	"""
 	Send a DNS request over HTTPS using POST method.
 

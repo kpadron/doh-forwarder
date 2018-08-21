@@ -5,9 +5,9 @@ import requests
 
 
 host = '127.0.0.1'
-port = 5001
+port = 5053
 upstreams = ['https://cloudflare-dns.com/dns-query']
-headers = {'accept': 'application/dns-message', 'content-type': 'application/dns-udpwireformat'}
+headers = {'accept': 'application/dns-message', 'content-type': 'application/dns-message'}
 
 
 def main():
