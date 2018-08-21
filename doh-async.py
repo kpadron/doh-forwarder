@@ -38,13 +38,16 @@ def main():
 
 
 class DohProtocol(asyncio.DatagramProtocol):
+	"""
+	DNS over HTTPS protocol to use with asyncio.
+	"""
+
 	def connection_made(self, transport):
-		self.loop = asyncio.get_event_loop()
 		self.transport = transport
 
 	def datagram_received(self, data, addr):
 		# Schedule packet forwarding coroutine
-		self.loop.create_task(self.forward_packet(data, addr))
+		asyncio.ensure_future(self.forward_packet(data, addr))
 
 	def connection_lost(self, exc):
 		pass
