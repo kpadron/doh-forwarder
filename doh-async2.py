@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import asyncio, aiohttp
-import random
+import threading, random
 
 
 host = '127.0.0.1'
@@ -9,32 +9,53 @@ headers = {'accept': 'application/dns-message', 'content-type': 'application/dns
 upstreams = ('https://1.1.1.1/dns-query', 'https://1.0.0.1/dns-query')
 conns = []
 
+forwarder_loop = asyncio.new_event_loop()
+
 
 def main():
 	# Setup event loop and UDP server
 	print('Starting UDP server listening on: %s#%d' % (host, port))
-	loop = asyncio.get_event_loop()
-	listen = loop.create_datagram_endpoint(DohProtocol, local_addr = (host, port))
-	transport, protocol = loop.run_until_complete(listen)
+	listen_loop = asyncio.get_event_loop()
+	listen = listen_loop.create_datagram_endpoint(DohProtocol, local_addr = (host, port))
+	transport, protocol = listen_loop.run_until_complete(listen)
+
+	# Setup and start forwarder loop
+	threading.Thread(target=forwarder, args=(forwarder_loop,), daemon=True).start()
+
+	# Serve forever
+	try:
+		listen_loop.run_forever()
+	except (KeyboardInterrupt, SystemExit):
+		pass
+
+	# Close UDP server and event loop
+	transport.close()
+	listen_loop.close()
+
+
+def forwarder(loop):
+	"""
+	Worker to run asyncio loop in separate thread.
+	"""
+
+	# Setup event loop
+	print('Setting up worker loop')
+	asyncio.set_event_loop(loop)
 
 	# Connect to upstream servers
 	for upstream in upstreams:
 		print('Connecting to upstream server: %s' % (upstream))
 		conns.append(loop.run_until_complete(upstream_connect()))
 
-	# Serve forever
 	try:
 		loop.run_forever()
 	except (KeyboardInterrupt, SystemExit):
 		pass
 
 	# Close upstream connections
+	print('Closing upstream connections')
 	for conn in conns:
 		loop.run_until_complete(upstream_close(conn))
-
-	# Close UDP server and event loop
-	transport.close()
-	loop.close()
 
 
 class DohProtocol(asyncio.DatagramProtocol):
@@ -46,8 +67,8 @@ class DohProtocol(asyncio.DatagramProtocol):
 		self.transport = transport
 
 	def datagram_received(self, data, addr):
-		# Schedule packet forwarding coroutine
-		asyncio.ensure_future(self.forward_packet(data, addr))
+		# Schedule packet forwarding coroutine to run in sub thread
+		asyncio.run_coroutine_threadsafe(self.forward_packet(data, addr), forwarder_loop)
 
 	def connection_lost(self, exc):
 		pass
