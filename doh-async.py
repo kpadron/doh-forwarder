@@ -13,11 +13,11 @@ except ImportError:
 # Handle command line arguments
 parser = argparse.ArgumentParser()
 parser.add_argument('-a', '--listen-address', default='127.0.0.1',
-					help='address to listen on for DNS over HTTPS server (default: %(default)s)')
+					help='address to listen on for DNS over HTTPS requests (default: %(default)s)')
 parser.add_argument('-p', '--listen-port', type=int, default=53,
-					help='port to listen on for DNS over HTTPS server (default: %(default)s)')
+					help='port to listen on for DNS over HTTPS requests (default: %(default)s)')
 parser.add_argument('-u', '--upstreams', nargs='+', default=['https://1.1.1.1/dns-query', 'https://1.0.0.1/dns-query'],
-					help='upstream servers to forward DNS queryies and requests to (default: %(default)s)')
+					help='upstream servers to forward DNS queries and requests to (default: %(default)s)')
 parser.add_argument('-t', '--tcp', action='store_true', default=False,
 					help='serve TCP based queries and requests along with UDP (default: %(default)s)')
 args = parser.parse_args()
