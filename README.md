@@ -4,15 +4,17 @@ DNS over HTTPS forwarder.
 doh-async.py seems to be best for my use case.
 
 ### Requirements
-- aiohttp library
-	* sudo apt install python3-pip -y && sudo pip3 install aiohttp
+These libraries are necessary for the proper execution of the program. Program behaviour without these prerequisites installed is undefined.
+- aiohttp library  
+	sudo apt install python3-pip -y && sudo pip3 install aiohttp
 
 ### Suggestions
-- uvloop library
-	* minor performance increase:
+The base program can be enhanced automatically by installing optional libraries. These are not required and the base program will run perfectly fine without them.
+- uvloop library  
+	minor performance increase:  
 	sudo apt install python3-pip -y && sudo pip3 install uvloop
-- aiodns library
-	* slight performance increase:
+- aiodns library  
+	slight performance increase:  
 	sudo apt install python3-pip -y && sudo pip3 install aiodns
 
 ### TODO
