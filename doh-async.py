@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import asyncio, aiohttp
-import random
+import logging, random
 
 
 host = '127.0.0.1'
@@ -11,15 +11,18 @@ conns = []
 
 
 def main():
+	# Setup logging
+	logging.basicConfig(level='INFO')
+
 	# Setup event loop and UDP server
-	print('Starting UDP server listening on: %s#%d' % (host, port))
+	logging.info('Starting UDP server listening on: %s#%d' % (host, port))
 	loop = asyncio.get_event_loop()
 	listen = loop.create_datagram_endpoint(DohProtocol, local_addr = (host, port))
 	transport, protocol = loop.run_until_complete(listen)
 
 	# Connect to upstream servers
 	for upstream in upstreams:
-		print('Connecting to upstream server: %s' % (upstream))
+		logging.info('Connecting to upstream server: %s' % (upstream))
 		conns.append(loop.run_until_complete(upstream_connect()))
 
 	# Serve forever
@@ -99,7 +102,7 @@ async def upstream_forward(url, data, conn):
 			if response.status == 200:
 				return await response.read()
 
-			print('%s (%d): IN %s, OUT %s' % (url, response.status, data, await response.read()))
+			logging.warning('%s (%d): IN %s, OUT %s' % (url, response.status, data, await response.read()))
 
 
 async def upstream_close(conn):
