@@ -1,0 +1,12 @@
+[Unit]
+Description=DNS over HTTPS stub forwarder
+After=syslog.target network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/doh-forwarder
+Restart=on-failure
+RestartSec=10
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
