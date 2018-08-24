@@ -12,15 +12,11 @@ These libraries are necessary for the proper execution of the program. Program b
 - aiohttp library https://github.com/aio-libs/aiohttp/  
 	sudo apt install python3-pip -y && sudo pip3 install aiohttp
 
-
 ### Suggestions
 The base program can be enhanced automatically by installing optional libraries. These are not required and the base program will run perfectly fine without them.
 - uvloop library https://github.com/MagicStack/uvloop  
 	minor performance increase:  
 	sudo apt install python3-pip -y && sudo pip3 install uvloop
-- aiodns library https://github.com/saghul/aiodns  
-	slight performance increase:  
-	sudo apt install python3-pip -y && sudo pip3 install aiodns
 
 ### Installation
 This short guide assumes running on a 64-bit systemd based linux machine, other configurations are untested.
