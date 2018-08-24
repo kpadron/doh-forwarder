@@ -51,5 +51,6 @@ This will undo all previous modifications done to your system as a result of run
 - [x] Add argument parsing for common configurables
 - [x] Add TCP resolving in addition to UDP resolving
 - [ ] Add DNS packet parsing to print human-readable packets to log
+- [ ] Add EDNS0 client subnet disable to enhance privacy
 - [ ] Add upstream server metrics and heuristics
 - [ ] Use exceptions to detect connection errors and attempt to reconnect
