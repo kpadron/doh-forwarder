@@ -124,11 +124,7 @@ class TcpDohProtocol(asyncio.Protocol):
 		data = await upstream_forward(upstreams[index], data[2:], conns[index])
 
 		# Send DNS packet to client
-		if self.transport.is_reading():
-			self.transport.write(struct.pack('! H', len(data)) + data)
-		else:
-			logging.warning('Client not reading, aborting transport')
-			self.transport.abort()
+		self.transport.write(struct.pack('! H', len(data)) + data)
 
 
 async def upstream_connect():
