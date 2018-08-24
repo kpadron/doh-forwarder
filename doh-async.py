@@ -166,8 +166,7 @@ async def upstream_forward(url, data, conn):
 
 				logging.warning('%s (%d): IN %s, OUT %s' % (url, response.status, data, await response.read()))
 		except aiohttp.ClientConnectionError:
-			logging.exception('Connection error with upstream server: %s', url)
-			return b''
+			logging.error('Connection error with upstream server: %s' % (url))
 
 
 async def upstream_close(conn):

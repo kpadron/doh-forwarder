@@ -3,12 +3,12 @@ DNS over HTTPS forwarder.
 
 This program is a basic attempt at creating a DNS over HTTPS inline-proxy forwarder.
 This means that it accepts standard UDP or TCP DNS packets and converts them to DoH HTTP requests.
-Queries made by this program are encrypted using schemes defined in the python standard ssl library.
+Queries made by this program are encrypted using TLS schemes defined in the python standard library **ssl**.
 The program can be configured with command line options to support a listening address and any non-standard ports.
 
 This program does not cache any queries that are resolved by the upstream DNS servers.
-This program is single threaded and based on the python standard library asyncio.
-Asynchronous HTTP requests are made over an encrypted connection to upstream servers.
+This program is single threaded and based on the python standard library **asyncio**.
+Asynchronous HTTP requests are made over encrypted connections to upstream servers via required library **aiohttp**.
 This allows for extra performance when many requests are received at once.
 If TCP resolving is enabled extra threads may be spawned to accept connections on the listening socket.
 Please note that this program was originally configured for operation with Cloudflare's public DNS servers and as such may contain specifics to that resolver.
@@ -19,13 +19,13 @@ Other scripts in this repository represent different approaches to the same prob
 ### Requirements
 These libraries are necessary for the proper execution of the program.
 Program behavior without these prerequisites installed is undefined.
-- aiohttp library https://github.com/aio-libs/aiohttp/  
+- [aiohttp](https://github.com/aio-libs/aiohttp/)  
 	sudo apt install python3-pip -y && sudo pip3 install aiohttp
 
 ### Suggestions
 The base program can be enhanced automatically by installing optional libraries.
 These are not required and the base program will run perfectly fine without them.
-- uvloop library https://github.com/MagicStack/uvloop  
+- [uvloop](https://github.com/MagicStack/uvloop)  
 	minor performance increase:  
 	sudo apt install python3-pip -y && sudo pip3 install uvloop
 
@@ -52,7 +52,7 @@ Uninstalling this program is as simple as running the **uninstall.sh** script wi
 	chmod +x uninstall.sh
 	sudo ./uninstall.sh
 
-This will undo all previous modifications done to your system as a result of running **install.sh**.
+This will undo all previous modifications done to your system as a result of running the **install.sh** script.
 
 ### TODO
 - [x] Add install/uninstall script (install as a service via systemd)
