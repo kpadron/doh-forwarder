@@ -20,19 +20,19 @@ Other scripts in this repository represent different approaches to the same prob
 These libraries are necessary for the proper execution of the program.
 Program behavior without these prerequisites installed is undefined.
 - [aiohttp](https://github.com/aio-libs/aiohttp/)  
-	sudo apt install python3-pip -y && sudo pip3 install aiohttp
+	> sudo apt install python3-pip -y && sudo pip3 install aiohttp
 
 ### Suggestions
 The base program can be enhanced automatically by installing optional libraries.
 These are not required and the base program will run perfectly fine without them.
 - [uvloop](https://github.com/MagicStack/uvloop)  
 	minor performance increase:  
-	sudo apt install python3-pip -y && sudo pip3 install uvloop
+	> sudo apt install python3-pip -y && sudo pip3 install uvloop
 
 ### Installation
 This short guide assumes running on a 64-bit systemd based linux machine, other configurations are untested.
 
-Intalling this program as a system service is as simple as running the **install.sh** script with super user permissions.
+Intalling or reinstalling this program as a system service is as simple as running the **install.sh** script with super user permissions.
 
 	chmod +x install.sh
 	sudo ./install.sh
@@ -58,7 +58,7 @@ This will undo all previous modifications done to your system as a result of run
 - [x] Add install/uninstall script (install as a service via systemd)
 - [x] Add argument parsing for common configurables
 - [x] Add TCP resolving in addition to UDP resolving
+- [x] Use exceptions to detect connection errors and attempt to reconnect
 - [ ] Add DNS packet parsing to print human-readable packets to log
-- [ ] Add EDNS0 client subnet disable to enhance privacy
 - [ ] Add upstream server metrics and heuristics
-- [ ] Use exceptions to detect connection errors and attempt to reconnect
+- [ ] Add EDNS0 client subnet disable to enhance privacy

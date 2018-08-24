@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import asyncio, aiohttp
-import logging, random
-import argparse, struct
+import random, struct
+import argparse, logging
 
 # Attempt to use uvloop if installed for extra performance
 try:
@@ -120,10 +120,10 @@ class TcpDohProtocol(asyncio.Protocol):
 		# Select upstream server to forward to
 		index = random.randrange(len(upstreams))
 
-		# Await upstream forwarding coroutine
+		# Await upstream forwarding coroutine (remove 16-bit length prefix)
 		data = await upstream_forward(upstreams[index], data[2:], conns[index])
 
-		# Send DNS packet to client
+		# Send DNS packet to client (add 16-bit length prefix)
 		self.transport.write(struct.pack('! H', len(data)) + data)
 
 
@@ -160,11 +160,15 @@ async def upstream_forward(url, data, conn):
 	# Await upstream response
 	while True:
 		try:
+			# Attempt to query the upstream server asynchronously
 			async with conn.post(url, data=data) as response:
 				if response.status == 200:
 					return await response.read()
 
+				# Log abnormal HTTP status codes
 				logging.warning('%s (%d): IN %s, OUT %s' % (url, response.status, data, await response.read()))
+
+		# Log connection errors (aiohttp should attempt to reconnect on next request)
 		except aiohttp.ClientConnectionError:
 			logging.error('Connection error with upstream server: %s' % (url))
 
