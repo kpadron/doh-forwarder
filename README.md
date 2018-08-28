@@ -59,6 +59,8 @@ This will undo all previous modifications done to your system as a result of run
 - [x] Add argument parsing for common configurables
 - [x] Add TCP resolving in addition to UDP resolving
 - [x] Use exceptions to detect connection errors and attempt to reconnect
+- [ ] Test asyncio executor performance (requests)
+- [ ] Test aioh2 performance
 - [ ] Add DNS packet parsing to print human-readable packets to log
 - [ ] Add upstream server metrics and heuristics
 - [ ] Add EDNS0 client subnet disable to enhance privacy
