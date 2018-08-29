@@ -170,7 +170,7 @@ async def upstream_forward(url, data, conn):
 
 		# Log connection errors (aiohttp should attempt to reconnect on next request)
 		except aiohttp.ClientConnectionError as exc:
-			logging.error('Connection error with upstream server: %s' % (exc))
+			logging.error('%s: %s' % (url, exc))
 
 
 async def upstream_close(conn):
