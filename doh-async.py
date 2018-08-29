@@ -136,7 +136,10 @@ async def upstream_connect():
 	"""
 
 	# Create connection with default DNS message headers
-	return aiohttp.ClientSession(headers=headers)
+	timeout = aiohttp.ClientTimeout(total=4)
+	connector = aiohttp.TCPConnector(keepalive_timeout=60, limit=0, limit_per_host=200, enable_cleanup_closed=True)
+	conn = aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers)
+	return conn
 
 
 async def upstream_forward(url, data, conn):
@@ -168,9 +171,14 @@ async def upstream_forward(url, data, conn):
 				# Log abnormal HTTP status codes
 				logging.warning('%s (%d): IN %s, OUT %s' % (url, response.status, data, await response.read()))
 
-		# Log connection errors (aiohttp should attempt to reconnect on next request)
+		# Log client connection errors (aiohttp should attempt to reconnect on next request)
 		except aiohttp.ClientConnectionError as exc:
-			logging.error('%s: %s' % (url, exc))
+			logging.error('Client error, %s: %s' % (url, exc))
+
+		# Log request timeout errors
+		except asyncio.TimeoutError as exc:
+			logging.error('Timeout error, %s: %s' % (url, exc))
+			return b''
 
 
 async def upstream_close(conn):
