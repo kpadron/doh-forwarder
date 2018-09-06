@@ -2,6 +2,7 @@
 import asyncio, aiohttp
 import random, struct
 import argparse, logging
+import dns
 
 # Attempt to use uvloop if installed for extra performance
 try:
@@ -28,6 +29,8 @@ upstreams = args.upstreams
 
 headers = {'accept': 'application/dns-message', 'content-type': 'application/dns-message'}
 conns = []
+
+cache = dict()
 
 
 def main():
@@ -159,6 +162,12 @@ async def upstream_forward(url, data, conn):
 		https://tools.ietf.org/html/draft-ietf-doh-dns-over-https-12
 		https://developers.cloudflare.com/1.1.1.1/dns-over-https/wireformat/
 	"""
+
+	request = dns.message.from_wire(data)
+
+	# Check if answer is in the cache
+	for query in request.question:
+		if query in cache:
 
 	# Await upstream response
 	while True:
