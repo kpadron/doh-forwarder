@@ -8,6 +8,7 @@ import dns.query
 import dns.message
 import dns.name
 import socket
+import threading
 
 # Attempt to use uvloop if installed for extra performance
 try:
@@ -50,6 +51,7 @@ def main():
 	resolver = DnsResolver(configure=False)
 	resolver.nameservers = upstreams
 	resolver.cache = DnsLruCache(cache_size)
+	resolver.thread = threading.Thread(target=resolver.worker, args=(10,), daemon=True)
 	# resolver.cache = dns.resolver.LRUCache(cache_size)
 
 	# Setup event loop
@@ -57,17 +59,18 @@ def main():
 
 	# Setup UDP server
 	logging.info('Starting UDP server listening on: %s#%d' % (host, port))
-	udp_listen = loop.create_datagram_endpoint(UdpDnsProtocol, local_addr = (host, port))
+	udp_listen = loop.create_datagram_endpoint(UdpDnsListen, local_addr = (host, port))
 	udp, protocol = loop.run_until_complete(udp_listen)
 
 	# Setup TCP server
 	if args.tcp:
 		logging.info('Starting TCP server listening on %s#%d' % (host, port))
-		tcp_listen = loop.create_server(TcpDnsProtocol, host, port)
+		tcp_listen = loop.create_server(TcpDnsListen, host, port)
 		tcp = loop.run_until_complete(tcp_listen)
 
 	# Serve forever
 	try:
+		resolver.thread.start()
 		loop.run_forever()
 	except (KeyboardInterrupt, SystemExit):
 		pass
@@ -80,7 +83,7 @@ def main():
 	loop.close()
 
 
-class UdpDnsProtocol(asyncio.DatagramProtocol):
+class UdpDnsListen(asyncio.DatagramProtocol):
 	"""
 	DNS over UDP protocol.
 	"""
@@ -102,7 +105,7 @@ class UdpDnsProtocol(asyncio.DatagramProtocol):
 		self.transport.sendto(data, addr)
 
 
-class TcpDnsProtocol(asyncio.Protocol):
+class TcpDnsListen(asyncio.Protocol):
 	"""
 	DNS over TCP protocol.
 	"""
@@ -125,8 +128,6 @@ class DnsLruCache(dns.resolver.LRUCache):
 	"""
 	DNS record cache.
 	"""
-
-	#def __init__(self, size):
 
 	def get(self, key):
 		with self.lock:
@@ -155,6 +156,20 @@ class DnsLruCache(dns.resolver.LRUCache):
 					rr.ttl = ttl
 
 			return node.value
+
+	def expired(self):
+		"""
+		Returns list of expired or almost expired cache entries.
+		"""
+
+		expired = []
+		
+		with self.lock:
+			for k, v in self.data.items():
+				if v.value.expiration <= time.time() + 1.0:
+					expired.append(k)
+
+		return expired
 
 	# def __len__(self):
 	# 	with self.lock:
@@ -186,18 +201,14 @@ class DnsResolver(dns.resolver.Resolver):
 		self.tcp_socks = []
 		super().__init__(**kwargs)
 
-	def query(self, qname, qtype='A', qclass='IN'):
+	def query(self, qname, qtype='A', qclass='IN',   use_cache=True):
+		"""
+		Query upstream server or local cache for response to DNS query.
+		"""
+		
 		# Convert arguments to correct datatypes
 		if isinstance(qname, str):
 			qname = dns.name.from_text(qname, None)
-		# if isinstance(qtype, str):
-		# 	qtype = dns.rdatatype.from_text(qtype)
-		# if dns.rdatatype.is_metatype(qtype):
-		# 	pass
-		# if isinstance(qclass, str):
-		# 	qclass = dns.rdataclass.from_text(qclass)
-		# if dns.rdataclass.is_metaclass(qclass)
-		# 	pass
 
 		# Create list of names to query for
 		qnames = []
@@ -214,33 +225,34 @@ class DnsResolver(dns.resolver.Resolver):
 		nxdomains = {}
 		start = time.time()
 
+		# Try all names and exit on first successful response
 		for name in qnames:
-			if self.cache:
+			# Search local cache
+			if self.cache and use_cache:
 				answer = self.cache.get((name, qtype, qclass))
 
 				if answer is not None:
 					return answer
 
+			# Prepare DNS query for upstream server
 			request = dns.message.make_query(name, qtype, qclass)
-			if self.keyname is not None:
-				request.use_tsig(self.keyring, self.keyname, algorithm=self.keyalgorithm)
-			request.use_edns(self.edns, self.ednsflags, self.payload)
-			if self.flags is not None:
-				request.flags = self.flags
 
 			response = None
 
 			nameservers = self.nameservers[:]
 			errors = []
 
+			# Rotate upstream server list if necessary
 			if self.rotate:
 				random.shuffle(nameservers)
 				backoff = 0.10
 
+			# Keep trying until acceptable answer
 			while response is None:
 				if len(nameservers) == 0:
 					pass
 
+				# Try all nameservers
 				for nameserver in nameservers[:]:
 					timeout = self._compute_timeout(start)
 					port = self.nameserver_ports.get(nameserver, self.port)
@@ -311,7 +323,7 @@ class DnsResolver(dns.resolver.Resolver):
 			break
 
 		if all_nxdomain:
-			response = nxdomain_responses[qnames[0]]
+			response = nxdomains[qnames[0]]
 
 		answer = dns.resolver.Answer(name, qtype, qclass, response, False)
 
@@ -319,6 +331,23 @@ class DnsResolver(dns.resolver.Resolver):
 			self.cache.put((name, qtype, qclass), answer)
 
 		return answer
+
+	def worker(self, timeout):
+		"""
+		Worker to monitor cache and perform upstream requests on expired entries.
+		"""
+
+		if self.cache is None:
+			return
+
+		while True:
+			expired = self.cache.expired()
+
+			for key in expired:
+				logging.info('Updating %s' % (key[0]))
+				self.query(*key, use_cache=False)
+
+			time.sleep(timeout)
 
 
 def upstream_resolve_b(resolver, packet):
