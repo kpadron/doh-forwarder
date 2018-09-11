@@ -157,16 +157,16 @@ class DnsLruCache(dns.resolver.LRUCache):
 
 			return node.value
 
-	def expired(self):
+	def expired(self, timeout):
 		"""
 		Returns list of expired or almost expired cache entries.
 		"""
 
 		expired = []
-		
+
 		with self.lock:
 			for k, v in self.data.items():
-				if v.value.expiration <= time.time() + 1.0:
+				if v.value.expiration <= time.time() + timeout:
 					expired.append(k)
 
 		return expired
@@ -205,7 +205,7 @@ class DnsResolver(dns.resolver.Resolver):
 		"""
 		Query upstream server or local cache for response to DNS query.
 		"""
-		
+
 		# Convert arguments to correct datatypes
 		if isinstance(qname, str):
 			qname = dns.name.from_text(qname, None)
@@ -341,7 +341,7 @@ class DnsResolver(dns.resolver.Resolver):
 			return
 
 		while True:
-			expired = self.cache.expired()
+			expired = self.cache.expired(timeout)
 
 			for key in expired:
 				logging.info('Updating %s' % (key[0]))
@@ -366,6 +366,27 @@ def upstream_resolve_b(resolver, packet):
 	# Repack dns response to wireformat
 	return response.to_wire()
 
+async def udp_request(request, upstream, timeout):
+	loop = asyncio.get_event_loop()
+
+	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
+	sock.setblocking(0)
+
+	await loop.sock_connect(sock, upstream)
+
+	start = time.time()
+	await loop.sock_sendall(sock, request)
+	response = await loop.sock_recv(sock, 65535)
+
+	if start is None:
+		rtt = 0
+	else:
+		rtt = time.time() - start
+
+	sock.close()
+
+	return response
+
 def udp_forward(sock, upstream, request, timeout):
 	if not isinstance(request, bytes):
 		request = request.to_wire()
@@ -376,7 +397,6 @@ def udp_forward(sock, upstream, request, timeout):
 			s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
 			s.setblocking(0)
 			s.bind(('', 0))
-
 
 		try:
 			start = time.time()
