@@ -9,6 +9,7 @@ import dns.message
 import dns.name
 import socket
 import threading
+import janus
 
 # Attempt to use uvloop if installed for extra performance
 try:
@@ -41,6 +42,25 @@ cache_size = args.max_cache_size
 resolver = None
 # resolver.nameservers = upstreams
 
+# Basic diagram
+#           Q           Q
+# listener -> cache {} -> forwarder
+#           Q           Q
+
+# Queue for listener to post requests
+cache_request = janus.Queue()
+
+# Queue for cache to post responses
+cache_response = janus.Queue()
+
+# Queue for cache to store outstanding requests
+cache_outstanding = {}
+
+# Queue for cache to post requests
+forward_request = janus.Queue()
+
+# Queue for forwarder to post responses
+forward_response = janus.Queue()
 
 def main():
 	# Setup logging
@@ -92,17 +112,29 @@ class UdpDnsListen(asyncio.DatagramProtocol):
 		self.transport = transport
 
 	def datagram_received(self, data, addr):
-		asyncio.ensure_future(self.resolve_packet(data, addr))
+		asyncio.ensure_future(self.resolve(data, addr))
 
 	def error_received(self, exc):
 		logging.warning('Minor transport error')
 
-	async def resolve_packet(self, data, addr):
-		# Resolve request via resolver
-		data = upstream_resolve(resolver, data)
+	async def resolve_packet(self, query, addr):
+		# Post query to cache -> (query, addr)
+		await cache_request.async_q.put((query, addr))
+
+		# Get response from cache <- (response, addr)
+		response, addr = await cache_response.async_q.get()
 
 		# Send DNS packet to client
-		self.transport.sendto(data, addr)
+		self.transport.sendto(response, addr)
+
+def cache_worker():
+	while True:
+		query, addr = cache_request.sync_q.get_nowait()
+		request = dns.message.from_wire(query)
+
+		cache_outstanding[(request.qname, request.qtype, request.qclass)].append((request.id, addr))
+
+		
 
 
 class TcpDnsListen(asyncio.Protocol):
