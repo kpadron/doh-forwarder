@@ -9,15 +9,16 @@ import dns.message
 import dns.name
 import socket
 import threading
-import queue
-import janus
+import multiprocessing as mp
+import aioprocessing as aiomp
+import multiprocessing.managers
 
 # Attempt to use uvloop if installed for extra performance
-try:
-	import uvloop
-	asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-except ImportError:
-	pass
+# try:
+# 	import uvloop
+# 	asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+# except ImportError:
+# 	pass
 
 
 # Handle command line arguments
@@ -34,6 +35,8 @@ parser.add_argument('-m', '--max-cache-size', type=int, default=10000,
 					help='maximum size of the cache in dns records (default: %(default)s)')
 parser.add_argument('--active', action='store_true', default=False,
 					help='actively replace expired cache entries by performing upstream requests (default: %(default)s)')
+parser.add_argument('--timeout', type=float, default=3.0,
+					help='time to wait before giving up on a request (default: %(default)s seconds)')
 args = parser.parse_args()
 
 host = args.listen_address
@@ -41,6 +44,7 @@ port = args.listen_port
 upstreams = args.upstreams
 cache_size = args.max_cache_size
 active = args.active
+timeout = args.timeout
 
 # Basic diagram
 #           Q           Q
@@ -48,8 +52,10 @@ active = args.active
 #           Q           Q
 
 # Queue for listener to post requests and get responses
-cache_request = janus.Queue()
-cache_response = janus.Queue()
+cache_request = aiomp.AioQueue()
+cache_response = aiomp.AioQueue()
+forwarder_request = aiomp.AioQueue()
+forwarder_response = aiomp.AioQueue()
 
 
 def main():
@@ -59,17 +65,16 @@ def main():
 	# Setup resolver cache
 	workers = []
 	cache = DnsLruCache(cache_size)
-	forwarder_request = queue.Queue()
-	forwarder_response = queue.Queue()
-	t1 = threading.Thread(target=cache_recv, args=(cache, cache_request.sync_q, cache_response.sync_q, forwarder_request), daemon=True)
-	workers.append(t1)
-	t2 = threading.Thread(target=cache_send, args=(cache, forwarder_response, cache_response.sync_q), daemon=True)
-	workers.append(t2)
-	t3 = threading.Thread(target=forwarder, args=(('1.1.1.1', 53), 5, forwarder_request, forwarder_response), daemon=True)
-	workers.append(t3)
+	wait_table = DnsWaitTable()
+	# p4 = mp.Process(target=echo_worker, args=(forwarder_request, forwarder_response), daemon=True)
+	# workers.append(p4)
+	p1 = mp.Process(target=cache_worker, args=(cache, wait_table, cache_request, cache_response, forwarder_request, forwarder_response), daemon=True)
+	workers.append(p1)
+	p2 = mp.Process(target=forwarder_worker, args=(('1.1.1.1', 53), timeout, forwarder_request, forwarder_response), daemon=True)
+	workers.append(p2)
 	if active:
-		t4 = threading.Thread(target=active_cache, args=(cache, 10, forwarder_request), daemon=True)
-		workers.append(t4)
+		p3 = mp.Process(target=active_cache, args=(cache, 10, forwarder_request), daemon=True)
+		workers.append(p3)
 
 	# Setup event loop
 	loop = asyncio.get_event_loop()
@@ -119,14 +124,34 @@ class UdpDnsListen(asyncio.DatagramProtocol):
 	async def resolve_packet(self, query, addr):
 		# Post query to cache -> (query, addr)
 		logging.debug('listener: Cache POST %s' % (addr[0]))
-		await cache_request.async_q.put((query, addr))
+		await cache_request.coro_put((query, addr))
 
 		# Get response from cache <- (answer, addr)
-		answer, addr = await cache_response.async_q.get()
+		try:
+			answer, addr = await asyncio.wait_for(cache_response.coro_get(), timeout)
+		except asyncio.TimeoutError:
+			answer = b''
+
 		logging.debug('listener: Cache GET %s' % (addr[0]))
 
 		# Send DNS packet to client
 		self.transport.sendto(answer, addr)
+
+
+def echo_worker(in_queue, out_queue):
+	while True:
+		request = in_queue.get()
+
+		answer = dns.message.make_query(request.qname, request.qtype, request.qclass)
+
+		response = dns.resolver.Answer(request.qname, request.qtype, request.qclass, answer, False)
+		response.expiration = time.time() + 50
+
+		out_queue.put((request, response))
+
+
+class DnsCacheManager(multiprocessing.managers.BaseManager):
+	pass
 
 
 class DnsRequest:
@@ -163,27 +188,11 @@ class DnsWaitTable:
 		except KeyError:
 			raise KeyError
 
-	def get_lock(self, key):
-		with self.lock:
-			return self.get(key)
-
-	def set_lock(self, key, value):
-		with self.lock:
-			self.set(key, value)
-
-	def delete_lock(self, key):
-		with self.lock:
-			self.delete(key)
-
 
 class DnsLruCache(dns.resolver.LRUCache):
 	"""
 	Synchronized DNS LRU cache.
 	"""
-
-	def __init__(self, *args, **kwargs):
-		self.wait_table = DnsWaitTable()
-		super().__init__(*args, **kwargs)
 
 	def get(self, key):
 		"""
@@ -232,20 +241,18 @@ class DnsLruCache(dns.resolver.LRUCache):
 		return expired
 
 
-def cache_recv(cache, in_queue, out_queue, next_queue):
-	"""
-	Worker to process cache requests and forward requests to the next stage.
+def cache_worker(cache, wait_table, in_queue, out_queue, next_in, next_out):
+	loop = asyncio.new_event_loop()
+	asyncio.set_event_loop(loop)
+	asyncio.ensure_future(cache_async_read(cache, wait_table, in_queue, out_queue, next_in))
+	asyncio.ensure_future(cache_async_write(cache, wait_table, out_queue, next_out))
+	loop.run_forever()
 
-	Params:
-		cache      - cache object to store data in for quick retrieval (synchronized)
-		in_queue   - queue object to receive requests from (synchronized)
-		out_queue  - queue object to send responses to (synchronized)
-		next_queue - queue object to send requests for further processing (synchronized)
-	"""
 
+async def cache_async_read(cache, wait_table, in_queue, out_queue, next_in):
 	while True:
 		# Get query from client <- (query, addr)
-		query, addr = in_queue.get()
+		query, addr = await in_queue.coro_get()
 		request = dns.message.from_wire(query)
 		id = request.id
 		request = request.question[0]
@@ -259,62 +266,95 @@ def cache_recv(cache, in_queue, out_queue, next_queue):
 			answer = response.response.to_wire()
 
 			# Post response to client -> (answer, addr)
-			out_queue.put((answer, addr))
+			await out_queue.coro_put((answer, addr))
 			logging.debug('cache_recv: Client POST %s' % (request.qname))
 			continue
 
 		# Add client to wait list for this query
-		for _ in range(2):
-			try:
-				with cache.wait_table.lock:
-					cache.wait_table.get((request.qname, request.qtype, request.qclass)).append((id, addr))
+		try:
+			with wait_table.lock:
+				wait_list = wait_table.get((request.qname, request.qtype, request.qclass))
+				if (id, addr) not in wait_list:
+					wait_list.append((id, addr))
 
-			# No outstanding requests for this query so create wait list and forward request
-			except KeyError:
-				with cache.wait_table.lock:
-					cache.wait_table.set((request.qname, request.qtype, request.qclass), [])
+		# No outstanding requests for this query so create wait list and forward request
+		except KeyError:
+			with wait_table.lock:
+				wait_table.set((request.qname, request.qtype, request.qclass), [(id, addr)])
 
-				# Post query to forwarder -> (request)
-				next_queue.put(request)
-				logging.debug('cache_recv: Forwarder POST %s' % (request.qname))
-			else:
-				break
+			# Post query to forwarder -> (request)
+			await next_in.coro_put(request)
+			logging.debug('cache_recv: Forwarder POST %s' % (request.qname))
 
 
-def cache_send(cache, in_queue, out_queue):
-	"""
-	Worker to process and cache replies and responses from next stage.
-
-	Params:
-		cache     - cache object to store data in for quick retrieval (synchronized)
-		in_queue  - queue object to receive responses from (synchronized)
-		out_queue - queue object to send responses to (synchronized)
-	"""
-
+async def cache_async_write(cache, wait_table, out_queue, next_out):
 	while True:
 		# Get response from the forwarder <- (request, response)
-		request, response = in_queue.get()
+		request, response = await next_out.coro_get()
 		logging.debug('cache_send: Forwarder GET %s' % (request.qname))
 
 		# Add entry to cache
+		if response is None:
+			try:
+				with wait_table.lock:
+					wait_table.delete((request.qname, request.qtype, request.qclass))
+			except KeyError:
+				pass
+
+			continue
+
 		cache.put((request.qname, request.qtype, request.qclass), response)
 
 		# Reply to clients waiting for this query
 		try:
-			with cache.wait_table.lock:
-				reply_list = cache.wait_table.get((request.qname, request.qtype, request.qclass))
+			with wait_table.lock:
+				reply_list = wait_table.get((request.qname, request.qtype, request.qclass))
 
-				for (id, addr) in reply_list:
-					response.response.id = id
-					answer = response.response.to_wire()
+			for (id, addr) in reply_list:
+				response.response.id = id
+				answer = response.response.to_wire()
 
-					# Post response to client -> (answer, addr)
-					out_queue.put((answer, addr))
-					logging.debug('cache_send: Client POST %s' % (request.qname))
+				# Post response to client -> (answer, addr)
+				await out_queue.coro_put((answer, addr))
+				logging.debug('cache_send: Client POST %s' % (request.qname))
 
-				cache.wait_table.delete((request.qname, request.qtype, request.qclass))
+			with wait_table.lock:
+				wait_table.delete((request.qname, request.qtype, request.qclass))
 		except KeyError:
 			pass
+
+
+def forwarder_worker(upstream, timeout, in_queue, out_queue):
+	loop = asyncio.new_event_loop()
+	asyncio.set_event_loop(loop)
+
+	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
+	sock.setblocking(0)
+	loop.run_until_complete(loop.sock_connect(sock, upstream))
+
+	asyncio.ensure_future(forwarder_async(sock, timeout, in_queue, out_queue))
+	# asyncio.ensure_future(forwarder_async_write(upstream, timeout, in_queue, out_queue))
+	loop.run_forever()
+
+
+async def forwarder_async(sock, timeout, in_queue, out_queue):
+	while True:
+		request = await in_queue.coro_get()
+		logging.debug('forwarder: Cache GET %s' % (request.qname))
+
+		query = dns.message.make_query(request.qname, request.qtype, request.qclass)
+		query = query.to_wire()
+
+		answer, rtt = await udp_request(sock, query, timeout)
+
+		if answer == b'':
+			response = None
+		else:
+			answer = dns.message.from_wire(answer)
+			response = dns.resolver.Answer(request.qname, request.qtype, request.qclass, answer, False)
+
+		await out_queue.coro_put((request, response))
+		logging.debug('forwarder: Cache POST %s' % (request.qname))
 
 
 def forwarder(upstream, timeout, in_queue, out_queue):
@@ -348,13 +388,13 @@ def forwarder(upstream, timeout, in_queue, out_queue):
 		logging.debug('forwarder: Cache POST %s' % (request.qname))
 
 
-def active_cache(cache, timeout, out_queue):
+def active_cache(cache, period, out_queue):
 	"""
 	Worker to process cache entries and preemptively replace expired or almost expired entries.
 
 	Params:
 		cache     - cache object to store data in for quick retrieval (synchronized)
-		timeout   - time to wait between cache scans (in seconds)
+		period    - time to wait between cache scans (in seconds)
 		out_queue - queue object to send requests for further processing (synchronized)
 	"""
 
@@ -368,7 +408,7 @@ def active_cache(cache, timeout, out_queue):
 		if len(expired) > 0:
 			logging.info('active_cache: Updated %d/%d entries' % (len(expired), len(cache.data)))
 
-		time.sleep(timeout)
+		time.sleep(period)
 
 
 class TcpDnsListen(asyncio.Protocol):
@@ -390,204 +430,23 @@ class TcpDnsListen(asyncio.Protocol):
 		self.transport.close()
 
 
-
-
-
-class DnsResolver(dns.resolver.Resolver):
-	"""
-	DNS stub resolver.
-	"""
-
-	def __init__(self, **kwargs):
-		self.udp_socks = []
-		self.tcp_socks = []
-		super().__init__(**kwargs)
-
-	def query(self, qname, qtype='A', qclass='IN',   use_cache=True):
-		"""
-		Query upstream server or local cache for response to DNS query.
-		"""
-
-		# Convert arguments to correct datatypes
-		if isinstance(qname, str):
-			qname = dns.name.from_text(qname, None)
-
-		# Create list of names to query for
-		qnames = []
-		if qname.is_absolute():
-			qnames.append(qname)
-		else:
-			if len(qname) > 1:
-				qnames.append(qname.concatenate(dns.name.root))
-			if self.search:
-				for suffix in self.search:
-					qnames.append(qname.concatenate(self.domain))
-
-		all_nxdomain = True
-		nxdomains = {}
-		start = time.time()
-
-		# Try all names and exit on first successful response
-		for name in qnames:
-			# Search local cache
-			if self.cache and use_cache:
-				answer = self.cache.get((name, qtype, qclass))
-
-				if answer is not None:
-					return answer
-
-			# Prepare DNS query for upstream server
-			request = dns.message.make_query(name, qtype, qclass)
-
-			response = None
-
-			nameservers = self.nameservers[:]
-			errors = []
-
-			# Rotate upstream server list if necessary
-			if self.rotate:
-				random.shuffle(nameservers)
-				backoff = 0.10
-
-			# Keep trying until acceptable answer
-			while response is None:
-				if len(nameservers) == 0:
-					pass
-
-				# Try all nameservers
-				for nameserver in nameservers[:]:
-					timeout = self._compute_timeout(start)
-					port = self.nameserver_ports.get(nameserver, self.port)
-
-					try:
-						tcp_attempt = False
-
-						if tcp_attempt:
-							response = tcp_forward(None, (nameserver, port), request, timeout)
-						else:
-							response = udp_forward(None, (nameserver, port), request, timeout)
-
-							if response.flags & dns.flags.TC:
-								tcp_attempt = True
-								timeout = self._compute_timeout(start)
-								response = tcp_forward(None, (nameserver, port), request, timeout)
-
-					# Socket or timeout error
-					except (socket.error, dns.exception.Timeout) as exc:
-						response = None
-						continue
-
-					# Received reply from wrong source
-					except dns.query.UnexpectedSource as exc:
-						response = None
-						continue
-
-					# Received malformed data
-					except dns.exception.FormError as exc:
-						nameservers.remove(nameserver)
-						response = None
-						continue
-
-					# Using TCP but connection failed
-					except EOFError as exc:
-						nameservers.remove(nameserver)
-						response = None
-						continue
-
-					rcode = response.rcode()
-
-					if rcode == dns.rcode.YXDOMAIN:
-						pass
-
-					if rcode == dns.rcode.NOERROR or rcode == dns.rcode.NXDOMAIN:
-						break
-
-					if rcode != dns.rcode.SERVFAIL or not self.retry_servfail:
-						nameservers.remove(nameserver)
-
-					response = None
-
-				if response is not None:
-					break
-
-				# All nameservers failed to respond ideally
-				if len(nameservers) > 0:
-					timeout = self._compute_timeout(start)
-					sleep_time = min(timeout, backoff)
-					backoff *= 2
-					time.sleep(sleep_time)
-
-			if response.rcode() == dns.rcode.NXDOMAIN:
-				nxdomains[name] = response
-				continue
-
-			all_nxdomain = False
-			break
-
-		if all_nxdomain:
-			response = nxdomains[qnames[0]]
-
-		answer = dns.resolver.Answer(name, qtype, qclass, response, False)
-
-		if self.cache:
-			self.cache.put((name, qtype, qclass), answer)
-
-		return answer
-
-	def worker(self, timeout):
-		"""
-		Worker to monitor cache and perform upstream requests on expired entries.
-		"""
-
-		if self.cache is None:
-			return
-
-		while True:
-			expired = self.cache.expired(timeout)
-
-			for key in expired:
-				logging.info('Updating %s' % (key[0]))
-				self.query(*key, use_cache=False)
-
-			time.sleep(timeout)
-
-
-def upstream_resolve_b(resolver, packet):
-	# Convert wireformat to dns message
-	request = dns.message.from_wire(packet)
-	query = request.question[0]
-
-	# Get response from resolver
-	try:
-		response = resolver.query(query.name, query.rdtype, query.rdclass, raise_on_no_answer=False, ).response
-	except dns.resolver.NXDOMAIN as exc:
-		response = exc.response(query.name)
-
-	response.id = request.id
-
-	# Repack dns response to wireformat
-	return response.to_wire()
-
-async def udp_request(request, upstream, timeout):
+async def udp_request(sock, query, timeout):
 	loop = asyncio.get_event_loop()
 
-	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
-	sock.setblocking(0)
-
-	await loop.sock_connect(sock, upstream)
-
 	start = time.time()
-	await loop.sock_sendall(sock, request)
-	response = await loop.sock_recv(sock, 65535)
+	await loop.sock_sendall(sock, query)
+
+	try:
+		answer = await asyncio.wait_for(loop.sock_recv(sock, 65535), timeout)
+	except asyncio.TimeoutError:
+		return b'', -1
 
 	if start is None:
 		rtt = 0
 	else:
 		rtt = time.time() - start
 
-	sock.close()
-
-	return response
+	return answer, rtt
 
 def udp_forward(sock, upstream, request, timeout):
 	if not isinstance(request, bytes):
