@@ -68,7 +68,7 @@ def main():
 	# workers.append(p4)
 	p = mp.Process(target=cache_worker, args=(cache, wait_table, cache_request, cache_response, forwarder_request, forwarder_response), daemon=True)
 	workers.append(p)
-	p = mp.Process(target=forwarder_worker, args=(('1.1.1.1', 53), timeout, forwarder_request, forwarder_response), daemon=True)
+	p = mp.Process(target=forwarder_worker, args=((upstreams[0], 53), timeout, forwarder_request, forwarder_response), daemon=True)
 	workers.append(p)
 
 	# Setup event loop
