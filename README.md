@@ -60,7 +60,8 @@ This will undo all previous modifications done to your system as a result of run
 - [x] Add TCP resolving in addition to UDP resolving
 - [x] Use exceptions to detect connection errors and attempt to reconnect
 - [x] Test asyncio executor performance (requests)
-- [ ] Test aioh2 performance
+- [x] Test aioh2 performance
 - [ ] Add DNS packet parsing to print human-readable packets to log
 - [ ] Add upstream server metrics and heuristics
 - [ ] Add EDNS0 client subnet disable to enhance privacy
+- [x] Add DNS caching

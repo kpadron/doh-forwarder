@@ -42,7 +42,7 @@ def main():
 	# Setup cache if necessary
 	if not args.no_cache:
 		logging.info('Using DNS cache with %d capacity' % (50000))
-		cache = dns.resolver.LRUCache(50000)
+		cache = DohCache(50000)
 
 		# Report cache status every 12 hours
 		loop.call_later(12*3600, cache_reporter, cache, 12*3600)
@@ -348,6 +348,39 @@ def cache_reporter(cache, period):
 	logging.info('Cache status: %d/%d entries' % (count, size))
 
 	loop.call_later(period, cache_reporter, cache, period)
+
+class DohCache(dns.resolver.LRUCache):
+	def get(self, key):
+		"""
+		Returns value associated with key with ttl corrected.
+		"""
+
+		with self.lock:
+			# Attempt to lookup data
+			node = self.data.get(key)
+
+			if node is None:
+				return None
+
+			# Unlink because we're either going to move the node to the front
+			# of the LRU list or we're going to free it.
+			node.unlink()
+
+			# Check if data is expired
+			if node.value.expiration <= time.time():
+				del self.data[node.key]
+				return None
+
+			node.link_after(self.sentinel)
+
+			# Return data with updated ttl
+			response = node.value.response
+			ttl = int(node.value.expiration - time.time())
+			for section in (response.answer, response.authority, response.additional):
+				for rr in section:
+					rr.ttl = ttl
+
+			return node.value
 
 
 if __name__ == '__main__':
