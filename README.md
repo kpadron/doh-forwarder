@@ -13,7 +13,7 @@ This allows for extra performance when many requests are received at once.
 If TCP resolving is enabled extra threads may be spawned to accept connections on the listening socket.
 Please note that this program was originally configured for operation with Cloudflare's public DNS servers and as such may contain specifics to that resolver.
 
-**doh-async.py** is the main program for this project and as such will have the most features implemented.
+**doh-forwarder.py** is the main program for this project and as such will have the most features implemented.
 Other scripts in this repository represent different approaches to the same problem.
 
 ### Requirements
@@ -35,7 +35,7 @@ This short guide assumes running on a 64-bit systemd based linux machine, other 
 Intalling or reinstalling this program as a system service is as simple as running the **install.sh** script with super user permissions.
 
 	chmod +x install.sh
-	sudo ./install.sh
+	sudo ./install.sh doh-forwarder.py
 
 This will place the unit service file in the proper directory and load the program to run immediately and on reboot.
 Please modify the service file command line options as necessary before running the **install.sh** script:
