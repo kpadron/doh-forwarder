@@ -284,11 +284,10 @@ class DohResolver:
 			request = dns.message.from_wire(query)
 			id = request.id
 			request = request.question[0]
-			request = (request.name, request.rdtype, request.rdclass)
 
+			# Return cached entry if possible
 			if not update_only:
-				# Return cached entry if possible
-				cached, expiration = self.cache.get(request, True)
+				cached, expiration = self.cache.get((request.name, request.rdtype, request.rdclass))
 
 				if cached is not None:
 					cached.id = id
@@ -302,8 +301,8 @@ class DohResolver:
 		# Add answer to cache if necessary
 		if self.cache:
 			response = dns.message.from_wire(answer)
-			expiration = dns.resolver.Answer(*request, response, False).expiration
-			self.cache.put(request, response, expiration)
+			expiration = dns.resolver.Answer(request.name, request.rdtype, request.rdclass, response, False).expiration
+			self.cache.put((request.name, request.rdtype, request.rdclass), response, expiration)
 
 		return answer
 
@@ -425,18 +424,15 @@ class DohCache:
 		if self.min_ttl < 0:
 			self.min_ttl = 0
 
-	def get(self, key, extra=False):
+	def get(self, key):
 		"""
 		Returns value associated with key.
 
 		Params:
-			key    - identifier associated with requested value
-			extra  - flag used to request expiration data for this entry
-			offset - time to offset expiration checks (in seconds)
+			key - identifier associated with requested value
 
 		Returns:
-			The value associated with key if it exists, or (value, expiration)
-			tuple if extra info is requested.
+			The (value, expiration) tuple associated with key.
 		"""
 
 		if self.lock:
@@ -448,34 +444,25 @@ class DohCache:
 
 			if node is None:
 				self.misses += 1
-
-				if extra:
-					return (None, None)
-
-				return None
+				return (None, None)
 
 			# Unlink because we're either going to move the node to the front
 			# of the LRU list or we're going to free it.
 			node.unlink()
 
 			# Check if data is expired
-			if (time.time() + self.ttl_bias) > node.expiration:
-				self.misses += 1
-				del self.data[node.key]
-
-				if extra:
+			if node.expiration is not None:
+				now = time.time() + self.ttl_bias
+				if now > node.expiration:
+					self.misses += 1
+					del self.data[node.key]
 					return (None, None)
-
-				return None
 
 			self.hits += 1
 			node.link_after(self.sentinel)
 
-			# Return expiration info if requested
-			if extra:
-				return (node.value, node.expiration)
-
-			return node.value
+			# Return value and expiration info
+			return (node.value, node.expiration)
 
 		finally:
 			if self.lock:
