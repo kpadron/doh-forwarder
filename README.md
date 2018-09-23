@@ -6,8 +6,8 @@ This means that it accepts standard UDP or TCP DNS packets and converts them to 
 Queries made by this program are encrypted using TLS schemes defined in the python standard library **ssl**.
 The program can be configured with command line options to support a listening address and any non-standard ports.
 
-This program does not cache any queries that are resolved by the upstream DNS servers.
-This program is single threaded and based on the python standard library **asyncio**.
+This program caches any queries that are resolved by the upstream DNS servers (can be disabled).
+This program is meant to be single-threaded and is based on the python standard library **asyncio**.
 Asynchronous HTTP requests are made over encrypted connections to upstream servers via required library **aiohttp**.
 This allows for extra performance when many requests are received at once.
 If TCP resolving is enabled extra threads may be spawned to accept connections on the listening socket.
@@ -19,15 +19,20 @@ Other scripts in this repository represent different approaches to the same prob
 ### Requirements
 These libraries are necessary for the proper execution of the program.
 Program behavior without these prerequisites installed is undefined.
-- [aiohttp](https://github.com/aio-libs/aiohttp/)  
+- [aiohttp](https://github.com/aio-libs/aiohttp) required for asynchronous http requests  
 	> sudo apt install python3-pip -y && sudo pip3 install aiohttp
 
-### Suggestions
+- [dnspython](https://github.com/rthalley/dnspython) required for cache and DNS parsing  
+	> sudo apt install python3-pip -y && sudo pip3 install dnspython
+
+### Extras
 The base program can be enhanced automatically by installing optional libraries.
 These are not required and the base program will run perfectly fine without them.
-- [uvloop](https://github.com/MagicStack/uvloop)  
-	minor performance increase:  
+- [uvloop](https://github.com/MagicStack/uvloop) for performance increase  
 	> sudo apt install python3-pip -y && sudo pip3 install uvloop
+
+- [cchardet](https://github.com/PyYoshi/cChardet) for minor performance increase  
+	> sudo apt install python3-pip -y && sudo pip3 install cchardet
 
 ### Installation
 This short guide assumes running on a 64-bit systemd based linux machine, other configurations are untested.
@@ -40,11 +45,18 @@ Intalling or reinstalling this program as a system service is as simple as runni
 This will place the unit service file in the proper directory and load the program to run immediately and on reboot.
 Please modify the service file command line options as necessary before running the **install.sh** script:
 
+	[Unit]
+	Description=DNS over HTTPS stub forwarder
+	After=syslog.target network-online.target
+
 	[Service]
-	ExecStart=/usr/local/bin/doh-forwarder -a 192.168.1.56 -p 5053 --tcp -u https://example-upstream1.com/dns-query https://example-upstream2.com/dns-query
+	ExecStart=/usr/local/bin/doh-forwarder -l a.b.c.d -p 5053 --tcp -u https://x.x.x.x/dns-query https://y.y.y.y/dns-query
 	Restart=on-failure
 	RestartSec=10
 	KillMode=process
+
+	[Install]
+	WantedBy=multi-user.target
 
 ### Uninstallation
 Uninstalling this program is as simple as running the **uninstall.sh** script with super user permissions.
@@ -61,7 +73,11 @@ This will undo all previous modifications done to your system as a result of run
 - [x] Use exceptions to detect connection errors and attempt to reconnect
 - [x] Test asyncio executor performance (requests)
 - [x] Test aioh2 performance
+- [x] Add DNS caching
 - [ ] Add DNS packet parsing to print human-readable packets to log
 - [ ] Add upstream server metrics and heuristics
 - [ ] Add EDNS0 client subnet disable to enhance privacy
-- [x] Add DNS caching
+
+### FIXME
+- [ ] Rework active caching to be "smarter"
+- [ ] Create custom request/response objects for cache
