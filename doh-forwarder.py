@@ -284,10 +284,11 @@ class DohResolver:
 			request = dns.message.from_wire(query)
 			id = request.id
 			request = request.question[0]
+			request = (request.name, request.rdtype, request.rdclass)
 
 			# Return cached entry if possible
 			if not update_only:
-				cached, expiration = self.cache.get((request.name, request.rdtype, request.rdclass))
+				cached, expiration = self.cache.get(request)
 
 				if cached is not None:
 					cached.id = id
@@ -301,8 +302,8 @@ class DohResolver:
 		# Add answer to cache if necessary
 		if self.cache:
 			response = dns.message.from_wire(answer)
-			expiration = dns.resolver.Answer(request.name, request.rdtype, request.rdclass, response, False).expiration
-			self.cache.put((request.name, request.rdtype, request.rdclass), response, expiration)
+			expiration = dns.resolver.Answer(*request, response, False).expiration
+			self.cache.put(request, response, expiration)
 
 		return answer
 
