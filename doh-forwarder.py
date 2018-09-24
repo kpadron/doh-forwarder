@@ -2,6 +2,7 @@
 import asyncio, aiohttp
 import argparse, logging
 import struct, time
+import concurrent.futures
 import urllib.parse
 import dns.message
 import dns.resolver
@@ -46,30 +47,32 @@ def main():
 
 	# Setup event loop
 	loop = asyncio.get_event_loop()
+	tasks = []
 
 	# Setup cache if necessary
 	cache = None
 	if not args.no_cache:
-		#FIXME: Rework this to be smarter (maybe period timeout and min ttl)
-		# Periodically replace expired cache entries
-		lock = None
-		if args.active_cache:
-			import threading
-			lock = threading.RLock()
-			asyncio.ensure_future(resolver.worker(10))
-
 		logging.info('Using DNS cache with a maximum of %d entries' % (args.cache_size))
-		cache = DohCache(args.cache_size, args.min_ttl, args.ttl_bias, lock)
+		cache = DohCache(args.cache_size, args.min_ttl, args.ttl_bias)
 
 		# Report cache status every 6 hours
-		report_period = 6 * 3600
-		loop.call_later(report_period, cache_reporter, cache, report_period)
+		report_period = 6 #* 3600
+		report_task = asyncio.ensure_future(cache.report_scheduler(report_period))
+		tasks.append(report_task)
 
 	# Setup DNS resolver to cache/forward queries and answers
 	resolver = DohResolver(cache)
 
+	# Periodically replace expired cache entries
+	if cache and args.active_cache:
+		update_period = 10
+		update_task = asyncio.ensure_future(resolver.update_scheduler(update_period))
+		tasks.append(update_task)
+
 	# Connect to upstream servers
 	logging.info('Connecting to upstream servers: %r' % (args.upstreams))
+	if len(tasks) > 0:
+		loop.set_default_executor(concurrent.futures.ProcessPoolExecutor(len(tasks)))
 	loop.run_until_complete(resolver.connect((upstream, headers) for upstream in args.upstreams))
 
 	# Setup listening transports
@@ -94,15 +97,24 @@ def main():
 		loop.run_forever()
 	except (KeyboardInterrupt, SystemExit):
 		logging.info('Shutting down DNS over HTTPS forwarder')
+		loop.run_until_complete(loop.shutdown_asyncgens())
 
 	# Close upstream connections
 	logging.info('Closing upstream connections')
 	loop.run_until_complete(resolver.close())
 
-	# Close listening servers and event loop
+	# Close listening servers
 	logging.info('Closing listening transports')
 	for transport in transports:
 		transport.close()
+
+	# Close running tasks
+	for task in tasks:
+		exc = task.exception()
+		if exc:
+			print('Task with exception: %s' % (exc))
+
+		task.cancel()
 
 	# Wait for operations to end and close event loop
 	loop.run_until_complete(asyncio.sleep(0.3))
@@ -300,7 +312,7 @@ class DohResolver:
 		answer = await self.forward(query)
 
 		# Add answer to cache if necessary
-		if self.cache:
+		if self.cache and answer:
 			response = dns.message.from_wire(answer)
 			expiration = dns.resolver.Answer(*request, response, False).expiration
 			self.cache.put(request, response, expiration)
@@ -319,17 +331,15 @@ class DohResolver:
 		"""
 
 		# Cycle through upstream servers
-		index = 0
-		while True:
-			conn = self.conns[index]
+		upstreams = len(self.conns)
+		for index in range(upstreams * 2):
+			conn = self.conns[index % upstreams]
 			answer, status = await conn.forward_post(query)
 
 			if status:
-				break
+				return answer
 
-			index = (index + 1) % len(self.conns)
-
-		return answer
+		return b''
 
 	def fix_ttl(self, response, expiration):
 		"""
@@ -345,6 +355,110 @@ class DohResolver:
 			for rr in section:
 				if hasattr(rr, 'ttl'):
 					rr.ttl = max(ttl, 0)
+
+	async def update_scheduler(self, period):
+		"""
+		Worker used to process cache entries and preemptively replace expiring entries.
+
+		Params:
+			period - time to wait between cache scans (in seconds)
+		"""
+
+		try:
+			loop = asyncio.get_event_loop()
+
+			while True:
+				await asyncio.sleep(period)
+
+				expired = self.cache.expired(period * 2)
+
+				if len(expired) <= 0:
+					continue
+
+				diff = time.time()
+				updates = await loop.run_in_executor(None, update, [(conn.url, conn.headers) for conn in self.conns], expired)
+				diff = time.time() - diff
+
+				logging.info('Cache update: updated %d/%d expired entries in %.2f (s), %.2f (updates/s)' % (len(updates), len(expired), diff, len(updates) / diff))
+				for (request, response, expiration) in updates:
+					self.cache.put(request, response, expiration)
+
+		except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+			pass
+
+
+def update(upstreams, expired):
+	"""
+	Used to process cache entries and replace expiring entries.
+
+	Params:
+		upstreams - iterable of (url, headers) tuples
+		expired   - iterable of cache request keys
+
+	Returns:
+		An iterable of (request, response, expiration) tuples.
+	"""
+
+	try:
+		loop = asyncio.new_event_loop()
+
+		sessions = []
+		conns = []
+		for (url, headers) in upstreams:
+			connector = aiohttp.TCPConnector(keepalive_timeout=60, limit=0, limit_per_host=200, enable_cleanup_closed=True, loop=loop)
+			session = aiohttp.ClientSession(connector=connector, headers=headers, loop=loop)
+			sessions.append(session)
+			conns.append((session, url))
+
+		futures = []
+		for request in expired:
+			future = asyncio.ensure_future(update_forward(conns, request), loop=loop)
+			futures.append(future)
+
+		updated = []
+		for future in futures:
+			request, answer = loop.run_until_complete(future)
+
+			if answer:
+				response = dns.message.from_wire(answer)
+				expiration = dns.resolver.Answer(*request, response, False).expiration
+				updated.append((request, response, expiration))
+
+		for session in sessions:
+			loop.run_until_complete(session.close())
+
+		loop.run_until_complete(loop.shutdown_asyncgens())
+		loop.close()
+
+		return tuple(updated)
+
+	except (KeyboardInterrupt, SystemExit):
+		pass
+
+# FIXME: write proper documentation
+async def update_forward(conns, request):
+	"""
+	Write proper documentation.
+	"""
+
+	query = dns.message.make_query(*request).to_wire()
+
+	# Attempt to query the upstream server asynchronously
+	upstreams = len(conns)
+	for index in range(upstreams * 3):
+		try:
+			session, url = conns[index % upstreams]
+			async with session.post(url, data=query) as http:
+				if http.status == 200:
+					return (request, await http.read())
+
+		except aiohttp.ClientConnectionError:
+			pass
+
+		except asyncio.TimeoutError:
+			pass
+
+	return (request, b'')
 
 
 class DohCacheNode:
@@ -615,56 +729,38 @@ class DohCache:
 			if self.lock:
 				self.lock.release()
 
+	async def report_scheduler(self, period):
+		"""
+		Worker to log cache statistics at regular intervals.
 
-def cache_reporter(cache, period):
+		Params:
+			period - time to wait between cache scans (in seconds)
+		"""
+
+		try:
+			loop = asyncio.get_event_loop()
+
+			while True:
+				await asyncio.sleep(period)
+				await loop.run_in_executor(None, report, self.stats())
+
+		except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+			pass
+
+
+def report(stats):
 	"""
-	Worker used to log cache statistics at regular intervals.
-
-	Params:
-		cache  - cache object to monitor and scan
-		period - time to wait between cache scans (in seconds)
-	"""
-
-	loop = asyncio.get_event_loop()
-
-	count, size, hits, misses = cache.stats()
-
-	if (hits + misses) > 0:
-		logging.info('Cache statistics: %d/%d entries, hit/miss %d/%d %.1f%%' % (count, size, hits, misses, hits / (hits + misses) * 100))
-
-	loop.call_later(period, cache_reporter, cache, period)
-
-
-def cache_forwarder(requests, upstreams):
-	"""
-	Queries upstream servers and returns list of responses.
-
+	Used to log cache statistics.
 	"""
 
-	pass
+	try:
+		count, size, hits, misses = stats
 
+		if (hits + misses) > 0:
+			logging.info('Cache statistics: using %d/%d entries, hit/miss %d/%d %.1f%%' % (count, size, hits, misses, hits / (hits + misses) * 100))
 
-def cache_worker(cache, period):
-	"""
-	Worker used to process cache entries and preemptively replace expiring entries.
-
-	Params:
-		cache - cache object to monitor and scan
-		period - time to wait between cache scans (in seconds)
-	"""
-
-	while True:
-		expired = cache.expired(period)
-
-		responses = cache_forwarder(expired, ['https://1.1.1.1:443/dns-query'])
-
-		for (request, response) in responses:
-			cache.put(request, response)
-
-		# if expiring > 0:
-			# logging.info('Cache, updating %d/%d' % (expiring, len(self.cache.data)))
-
-		# await asyncio.sleep(period)
+	except (KeyboardInterrupt, SystemExit):
+		pass
 
 
 if __name__ == '__main__':
