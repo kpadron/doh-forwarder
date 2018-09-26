@@ -56,7 +56,7 @@ def main():
 		cache = DohCache(args.cache_size, args.min_ttl, args.ttl_bias)
 
 		# Report cache status every 6 hours
-		report_period = 6 #* 3600
+		report_period = 6 * 3600
 		report_task = asyncio.ensure_future(cache.report_scheduler(report_period))
 		tasks.append(report_task)
 
@@ -110,9 +110,9 @@ def main():
 
 	# Close running tasks
 	for task in tasks:
-		exc = task.exception()
-		if exc:
-			print('Task with exception: %s' % (exc))
+		#exc = task.exception()
+		#if exc:
+		#	print('Task with exception: %s' % (exc))
 
 		task.cancel()
 
