@@ -6,7 +6,6 @@ This means that it accepts standard UDP or TCP DNS packets and converts them to 
 Queries made by this program are encrypted using TLS schemes defined in the python standard library **ssl**.
 The program can be configured with command line options to support a listening address and any non-standard ports.
 
-This program caches any queries that are resolved by the upstream DNS servers (can be disabled).
 This program is meant to be single-threaded and is based on the python standard library **asyncio**.
 Asynchronous HTTP requests are made over encrypted connections to upstream servers via required library **aiohttp**.
 This allows for extra performance when many requests are received at once.
@@ -21,9 +20,6 @@ These libraries are necessary for the proper execution of the program.
 Program behavior without these prerequisites installed is undefined.
 - [aiohttp](https://github.com/aio-libs/aiohttp) required for asynchronous http requests  
 	> sudo apt install python3-pip -y && sudo pip3 install aiohttp
-
-- [dnspython](https://github.com/rthalley/dnspython) required for cache and DNS parsing  
-	> sudo apt install python3-pip -y && sudo pip3 install dnspython
 
 ### Extras
 The base program can be enhanced automatically by installing optional libraries.
@@ -71,13 +67,3 @@ This will undo all previous modifications done to your system as a result of run
 - [x] Add argument parsing for common configurables
 - [x] Add TCP resolving in addition to UDP resolving
 - [x] Use exceptions to detect connection errors and attempt to reconnect
-- [x] Test asyncio executor performance (requests)
-- [x] Test aioh2 performance
-- [x] Add DNS caching
-- [ ] Add DNS packet parsing to print human-readable packets to log
-- [ ] Add upstream server metrics and heuristics
-- [ ] Add EDNS0 client subnet disable to enhance privacy
-
-### FIXME
-- [ ] Rework active caching to be "smarter"
-- [ ] Create custom request/response objects for cache
