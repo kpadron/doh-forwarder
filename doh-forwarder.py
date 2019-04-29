@@ -5,7 +5,7 @@ import argparse
 import logging
 import struct
 import random
-import datetime
+import time
 
 
 def main():
@@ -82,15 +82,6 @@ def main():
 	loop.run_until_complete(asyncio.sleep(0.3))
 	loop.close()
 
-
-def get_epoch_ms():
-	"""
-	Returns the current number of milliseconds since the Epoch.
-	"""
-
-	return (datetime.datetime.utcnow() - datetime.datetime.utcfromtimestamp(0)).total_seconds() * 1000.0
-
-
 class UpstreamContext:
 	"""
 	An object used to manage upstream server connections and metadata.
@@ -108,7 +99,7 @@ class UpstreamContext:
 		Returns a formatted string of statistics for this upstream server.
 		"""
 
-		return '%s (rtt: %.2f ms, queries: %u, answers: %u)' % (self.url, self.rtt, self.queries, self.answers)
+		return '%s (rtt: %.3f s, queries: %u, answers: %u)' % (self.url, self.rtt, self.queries, self.answers)
 
 
 class DohResolver:
@@ -148,7 +139,7 @@ class DohResolver:
 		"""
 
 		avg_rtt = sum([u.rtt for u in self._upstreams]) / len(self._upstreams)
-		return '%x (avg_rtt: %.2f ms, total_queries: %u, total_answers: %u)' % (id(self), avg_rtt, self._queries, self._answers)
+		return '%x (avg_rtt: %.3f s, total_queries: %u, total_answers: %u)' % (id(self), avg_rtt, self._queries, self._answers)
 
 	async def resolve(self, query):
 		"""
@@ -171,7 +162,7 @@ class DohResolver:
 
 		# Forward request upstream
 		try:
-			rtt = get_epoch_ms()
+			rtt = time.monotonic()
 			self._queries += 1
 			upstream.queries += 1
 			async with upstream.session.post(upstream.url, data=query) as http:
@@ -182,7 +173,7 @@ class DohResolver:
 
 				# Wait for response
 				answer = await http.read()
-				rtt = get_epoch_ms() - rtt
+				rtt = time.monotonic() - rtt
 				self._answers += 1
 				upstream.answers += 1
 
@@ -202,7 +193,7 @@ class DohResolver:
 		# Log exceptions
 		except Exception as exc:
 			logging.error('Client error: %s, %s' % (upstream.url, exc))
-			upstream.rtt += 1000.0
+			upstream.rtt += 1.0
 			return b''
 
 	async def close(self):
