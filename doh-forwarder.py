@@ -6,6 +6,7 @@ import logging
 import struct
 import random
 import time
+import base64
 
 
 def main():
@@ -28,12 +29,6 @@ def main():
 						help='serve TCP based queries and requests along with UDP (default: %(default)s)')
 	args = parser.parse_args()
 
-	headers = \
-	{
-		'accept': 'application/dns-message',
-		'content-type': 'application/dns-message'
-	}
-
 	# Setup logging
 	logging.basicConfig(level='INFO', format='[%(levelname)s] %(message)s')
 	logging.info('Starting DNS over HTTPS forwarder')
@@ -43,7 +38,7 @@ def main():
 	loop = asyncio.get_event_loop()
 
 	# Setup DNS resolver to cache/forward queries and answers
-	resolver = DohResolver([UpstreamContext(u, headers) for u in args.upstreams])
+	resolver = DohResolver([UpstreamContext(u) for u in args.upstreams])
 
 	# Setup listening transports
 	transports = []
@@ -87,12 +82,12 @@ class UpstreamContext:
 	An object used to manage upstream server connections and metadata.
 	"""
 
-	def __init__(self, url, headers=None):
+	def __init__(self, url):
 		self.url = url
 		self.rtt = 0.0
 		self.queries = 0
 		self.answers = 0
-		self.session = aiohttp.ClientSession(headers=headers)
+		self.session = aiohttp.ClientSession()
 
 	def get_stats(self):
 		"""
@@ -100,6 +95,81 @@ class UpstreamContext:
 		"""
 
 		return '%s (rtt: %.3f s, queries: %u, answers: %u)' % (self.url, self.rtt, self.queries, self.answers)
+
+	async def forward_post(self, query):
+		"""
+		Resolve a DNS query via forwarding to upstream DoH server (POST).
+
+		Params:
+			query - wireformat DNS request packet
+
+		Returns:
+			A wireformat DNS response packet.
+
+		Notes:
+			Using DNS over HTTPS POST format as described here:
+			https://tools.ietf.org/html/draft-ietf-doh-dns-over-https-12
+			https://developers.cloudflare.com/1.1.1.1/dns-over-https/wireformat/
+		"""
+
+		headers = {'accept': 'application/dns-message', 'content-type': 'application/dns-message'}
+		rtt = time.monotonic()
+		self.queries += 1
+
+		async with self.session.post(self.url, headers=headers, data=query) as http:
+			# Log abnormal HTTP status codes
+			if http.status != 200:
+				logging.warning('HTTP error: %s (%d)' % (self.url, http.status))
+				self.rtt += 1.0
+				return b''
+
+			# Wait for response
+			answer = await http.read()
+			rtt = time.monotonic() - rtt
+			self.answers += 1
+
+			# Update estimated RTT for this upstream connection
+			self.rtt = 0.875 * self.rtt + 0.125 * rtt
+
+			return answer
+
+	async def forward_get(self, query):
+		"""
+		Resolve a DNS query via forwarding to upstream DoH server (GET).
+
+		Params:
+			query - wireformat DNS request packet
+
+		Returns:
+			A wireformat DNS response packet.
+
+		Notes:
+			Using DNS over HTTPS GET format as described here:
+			https://tools.ietf.org/html/draft-ietf-doh-dns-over-https-12
+			https://developers.cloudflare.com/1.1.1.1/dns-over-https/wireformat/
+		"""
+
+		# Encode DNS query into url
+		url = self.url + '?dns=' + base64.urlsafe_b64encode(query).decode()
+		rtt = time.monotonic()
+		self.queries += 1
+
+		async with self.session.get(url, headers={'accept': 'application/dns-message'}) as http:
+			# Log abnormal HTTP status codes
+			if http.status != 200:
+				logging.warning('HTTP error: %s (%d)' % (url, http.status))
+				self.rtt += 1.0
+				return b''
+
+			# Wait for response
+			answer = await http.read()
+			rtt = time.monotonic() - rtt
+			self.answers += 1
+
+			# Update estimated RTT for this upstream connection
+			self.rtt = 0.875 * self.rtt + 0.125 * rtt
+
+			return answer
 
 
 class DohResolver:
@@ -117,18 +187,18 @@ class DohResolver:
 		Select a upstream server to forward to (biases towards upstreams with lower rtt).
 
 		Returns:
-				The selected upstream server.
+			The selected upstream server.
 		"""
 
-		max_rtt = max([upstream.rtt for upstream in self._upstreams])
-		return random.choices(self._upstreams, [max_rtt - upstream.rtt + 1 for upstream in self._upstreams])[0]
+		max_rtt = max([u.rtt for u in self._upstreams])
+		return weighted_choice([(u, max_rtt - u.rtt + 1.0) for u in self._upstreams])
 
 	def _select_upstream_random(self):
 		"""
 		Select a upstream server to forward to (random even distribution).
 
 		Returns:
-				The selected upstream server.
+			The selected upstream server.
 		"""
 
 		return self._upstreams[random.randint(0, len(self._upstreams) - 1)]
@@ -139,62 +209,44 @@ class DohResolver:
 		"""
 
 		avg_rtt = sum([u.rtt for u in self._upstreams]) / len(self._upstreams)
-		return '%x (avg_rtt: %.3f s, total_queries: %u, total_answers: %u)' % (id(self), avg_rtt, self._queries, self._answers)
+		return 'Statistics for resolver at 0x%x (avg_rtt: %.3f s, total_queries: %u, total_answers: %u)' % (id(self), avg_rtt, self._queries, self._answers)
 
 	async def resolve(self, query):
 		"""
-		Resolve a DNS query via forwarding to upstream DoH server (POST).
+		Resolve a DNS query via forwarding to upstream DoH server.
 
 		Params:
-				query - wireformat DNS request packet
+			query - wireformat DNS request packet
 
 		Returns:
-				A wireformat DNS response packet.
-
-		Notes:
-				Using DNS over HTTPS POST format as described here:
-				https://tools.ietf.org/html/draft-ietf-doh-dns-over-https-12
-				https://developers.cloudflare.com/1.1.1.1/dns-over-https/wireformat/
+			A wireformat DNS response packet.
 		"""
 
 		# Select upstream to connect to
 		upstream = self._select_upstream_rtt()
+		self._queries += 1
 
 		# Forward request upstream
 		try:
-			rtt = time.monotonic()
-			self._queries += 1
-			upstream.queries += 1
-			async with upstream.session.post(upstream.url, data=query) as http:
-				# Log abnormal HTTP status codes
-				if http.status != 200:
-					logging.warning('HTTP error: %s (%d)' % (upstream.url, http.status))
-					return b''
+			answer = await upstream.forward_get(query)
 
-				# Wait for response
-				answer = await http.read()
-				rtt = time.monotonic() - rtt
-				self._answers += 1
-				upstream.answers += 1
-
-				# Update estimated RTT for this upstream connection
-				upstream.rtt = 0.875 * upstream.rtt + 0.125 * rtt
-
-				# Reset Rtt every 1000 processed requests to prevent drift
-				if self._answers % 1000 == 0:
-					logging.info('Resolver statistics %s' % (self.get_stats()))
-					for u in self._upstreams:
-						logging.info(u.get_stats())
-						u.rtt = 0.0
-
-				# Return response
-				return answer
+			# Return response
+			self._answers += 1
+			return answer
 
 		# Log exceptions
 		except Exception as exc:
 			logging.error('Client error: %s, %s' % (upstream.url, exc))
-			upstream.rtt += 1.0
+			upstream.rtt += 2.0
 			return b''
+
+		# Reset RTT every 1000 processed requests to prevent drift
+		finally:
+			if self._queries % 1000 == 0:
+				logging.info(self.get_stats())
+				for u in self._upstreams:
+					logging.info(u.get_stats())
+					u.rtt = 0.0
 
 	async def close(self):
 		"""
@@ -261,6 +313,20 @@ class TcpDohProtocol(asyncio.Protocol):
 
 		# Send DNS answer to client (add 16-bit length prefix)
 		self.transport.write(struct.pack('! H', len(answer)) + answer)
+
+
+def weighted_choice(choices):
+	"""
+	Returns a choice from the (choice, weight) tuple iterable based on weight.
+	"""
+
+	total = sum(w for _, w in choices)
+	r = random.uniform(0, total)
+	upto = 0
+	for c, w in choices:
+		if upto + w >= r:
+			return c
+		upto += w
 
 
 if __name__ == '__main__':
