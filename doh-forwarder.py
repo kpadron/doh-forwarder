@@ -2,7 +2,6 @@
 import argparse
 import asyncio
 import base64
-import itertools
 import logging
 import random
 from abc import ABCMeta, abstractmethod
@@ -236,8 +235,8 @@ class AsyncDnsResolver:
 		"""Selects a upstream DNS server to forward to (biased towards upstreams with a lower rtt)."""
 		rtts = [upstream.rtt for upstream in self._upstreams]
 		max_rtt = max(rtts)
-		cum_weights = itertools.accumulate([max_rtt - rtt + 1.0 for rtt in rtts])
-		return random.choices(self._upstreams, cum_weights=cum_weights)[1]
+		weights = (max_rtt - rtt + 1.0 for rtt in rtts)
+		return random.choices(self._upstreams, weights=weights)[0]
 
 	@property
 	def queries(self) -> int:
