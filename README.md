@@ -6,7 +6,7 @@ This means that it accepts standard UDP or TCP DNS packets and converts them to 
 Queries made by this program are encrypted using TLS schemes defined in the python standard library **ssl**.
 The program can be configured with command line options to support a listening address and any non-standard ports.
 
-This program is meant to be single-threaded and is based on the python standard library **asyncio**.
+This program is meant to be single-threaded and is based on the python standard library module **asyncio**.
 Asynchronous HTTP requests are made over encrypted connections to upstream servers via required library **aiohttp**.
 This allows for extra performance when many requests are received at once.
 If TCP resolving is enabled extra threads may be spawned to accept connections on the listening socket.
@@ -18,17 +18,8 @@ Other scripts in this repository represent different approaches to the same prob
 ### Requirements
 These libraries are necessary for the proper execution of the program.
 Program behavior without these prerequisites installed is undefined.
-- [aiohttp](https://github.com/aio-libs/aiohttp) required for asynchronous http requests  
+- [aiohttp](https://github.com/aio-libs/aiohttp) required for asynchronous http requests
 	> sudo apt install python3-pip -y && sudo pip3 install aiohttp
-
-### Extras
-The base program can be enhanced automatically by installing optional libraries.
-These are not required and the base program will run perfectly fine without them.
-- [uvloop](https://github.com/MagicStack/uvloop) for performance increase  
-	> sudo apt install python3-pip -y && sudo pip3 install uvloop
-
-- [cchardet](https://github.com/PyYoshi/cChardet) for minor performance increase  
-	> sudo apt install python3-pip -y && sudo pip3 install cchardet
 
 ### Installation
 This short guide assumes running on a 64-bit systemd based linux machine, other configurations are untested.
@@ -66,4 +57,4 @@ This will undo all previous modifications done to your system as a result of run
 - [x] Add install/uninstall script (install as a service via systemd)
 - [x] Add argument parsing for common configurables
 - [x] Add TCP resolving in addition to UDP resolving
-- [x] Use exceptions to detect connection errors and attempt to reconnect
+- [] Use exceptions to detect connection errors and attempt to reconnect
