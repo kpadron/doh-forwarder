@@ -7,7 +7,7 @@ Queries made by this program are encrypted using TLS schemes defined in the pyth
 The program can be configured with command line options to support a listening address and any non-standard ports.
 
 This program is meant to be single-threaded and is based on the python standard library module **asyncio**.
-Asynchronous HTTP requests are made over encrypted connections to upstream servers via required library **aiohttp**.
+Asynchronous HTTP requests are made over encrypted connections to upstream servers via required library **httpx**.
 This allows for extra performance when many requests are received at once.
 If TCP resolving is enabled extra threads may be spawned to accept connections on the listening socket.
 Please note that this program was originally configured for operation with Cloudflare's public DNS servers and as such may contain specifics to that resolver.
@@ -18,8 +18,8 @@ Other scripts in this repository represent different approaches to the same prob
 ### Requirements
 These libraries are necessary for the proper execution of the program.
 Program behavior without these prerequisites installed is undefined.
-- [aiohttp](https://github.com/aio-libs/aiohttp) required for asynchronous http requests
-	> sudo apt install python3-pip -y && sudo pip3 install aiohttp
+- [httpx](https://github.com/encode/httpx/) required for asynchronous http requests
+	> sudo apt install python3-pip -y && sudo pip3 install httpx[http2]
 
 ### Installation
 This short guide assumes running on a 64-bit systemd based linux machine, other configurations are untested.
