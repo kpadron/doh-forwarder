@@ -244,7 +244,7 @@ class AsyncDohUpstreamContext(AsyncDnsUpstreamContext):
 	async def aforward_query(self, query: bytes) -> bytes:
 		query = memoryview(query)
 		qid = query[:2]
-		answer = await self.aforward_get(b''.join([b'\0' * 2, query[2:]]))
+		answer = await self.aforward_post(b''.join([b'\0' * 2, query[2:]]))
 		return b''.join([qid, memoryview(answer)[2:]])
 
 	async def aclose(self) -> None:
