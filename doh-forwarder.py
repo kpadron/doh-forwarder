@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 import argparse
 import array
-import asyncio
+import asyncio as aio
 import base64
 import itertools
 import logging
 import random
 import statistics
 from abc import ABCMeta, abstractmethod
+from asyncio import DatagramTransport, Lock, StreamReader, StreamWriter, Task
 from types import TracebackType
-from typing import ClassVar, Iterable, Iterator, Optional, SupportsFloat, Tuple, Type
+from typing import (ClassVar, Iterable, Iterator, List, Optional, Sequence,
+                    Set, SupportsFloat, Tuple, Type, Union)
 
 import httpx
-
 
 DEFAULT_LISTEN_ADDRESSES = \
 [
@@ -36,7 +37,7 @@ DEFAULT_UPSTREAMS = \
 
 async def main(args) -> None:
 	# Setup event loop
-	loop = asyncio.get_running_loop()
+	loop = aio.get_running_loop()
 
 	# Setup DNS resolver to cache/forward queries and answers
 	async with AsyncDnsResolver(args.upstreams, AsyncDohUpstreamContext) as resolver:
@@ -53,13 +54,14 @@ async def main(args) -> None:
 				# Setup TCP server
 				if args.tcp:
 					logging.info('Starting TCP server listening on %s#%d' % (addr, port))
-					tcp = await asyncio.start_server(TcpResolverProtocol(resolver).ahandle_peer, addr, port)
+					tcp = await aio.start_server(TcpResolverProtocol(resolver).ahandle_peer, addr, port)
 					transports.append(tcp)
 
 		# Serve forever
 		try:
 			while True:
-				await asyncio.sleep(5)
+				await aio.sleep(3600)
+				logging.info(resolver.get_stats())
 
 		except (KeyboardInterrupt, SystemExit):
 			pass
@@ -70,11 +72,11 @@ async def main(args) -> None:
 		for transport in transports:
 			transport.close()
 			if hasattr(transport, 'wait_closed'):
-				wait_closers.append(asyncio.create_task(transport.wait_closed()))
+				wait_closers.append(aio.create_task(transport.wait_closed()))
 
-		await asyncio.wait(wait_closers)
+		await aio.wait(wait_closers)
 
-	await asyncio.sleep(0.3)
+	await aio.sleep(0.3)
 
 
 class AsyncDnsUpstreamContext(metaclass=ABCMeta):
@@ -121,6 +123,11 @@ class AsyncDnsUpstreamContext(metaclass=ABCMeta):
 
 		Returns:
 			A wireformat DNS answer packet.
+
+		Notes:
+			This coroutine is be safely cancellable. That is, even if the
+			coroutine is cancelled it still leaves any internal state
+			it uses in a consistent and usable state.
 		"""
 		...
 
@@ -144,108 +151,87 @@ class AsyncDohUpstreamContext(AsyncDnsUpstreamContext):
 			headers={'accept': 'application/dns-message'},
 			http2=True)
 
-	async def aforward_post(self, query: bytes) -> bytes:
+	async def aforward_post(self, query: bytes) -> Tuple[bytes, float]:
 		"""Resolve a DNS query via forwarding to a upstream DoH server (POST).
 
 		Params:
 			query - A wireformat DNS query packet.
 
 		Returns:
-			A wireformat DNS answer packet.
+			A wireformat DNS answer packet and rtt sample.
 
 		Notes:
 			Using DNS over HTTPS POST format as described here:
 			https://datatracker.ietf.org/doc/html/rfc8484
 			https://developers.cloudflare.com/1.1.1.1/dns-over-https/wireformat/
 		"""
-		self.queries += 1
+		# Send HTTP request to upstream DoH server and wait for the response
+		response = await aio.shield(
+			self.session.post(
+				self.host,
+				headers={'content-type': 'application/dns-message'},
+				content=query))
 
-		headers = {'content-type': 'application/dns-message'}
-		rtt = None
+		# Parse HTTP response
+		response.raise_for_status()
+		answer = response.read()
+		rtt = response.elapsed.total_seconds()
 
-		try:
-			# Send HTTP request to upstream DoH server and wait for the response
-			response = await self.session.post(self.host, headers=headers, content=query)
+		# Return the DNS answer
+		return (answer, rtt)
 
-			# Parse HTTP response
-			rtt = response.elapsed.total_seconds()
-			response.raise_for_status()
-			answer = response.read()
-
-			# print(f'REQUEST POST {response.request.url} {response.request.headers}')
-			# print(f'{response} {response.http_version} {response.elapsed} -> {response.headers}')
-
-			# Return the DNS answer
-			self.answers += 1
-			return answer
-
-		# Raise connection error
-		except (httpx.NetworkError, httpx.RemoteProtocolError):
-			raise ConnectionError(f'DNS query to DoH server {self.host} failed due to network errors')
-
-		# Raise abnormal HTTP status codes
-		except httpx.HTTPStatusError:
-			raise ConnectionError(f'received HTTP error status from DoH server {self.host} ({response.status_code})')
-
-		# Update estimated RTT for this upstream connection
-		finally:
-			if rtt is not None:
-				self.add_rtt_sample(rtt)
-
-	async def aforward_get(self, query: bytes) -> bytes:
+	async def aforward_get(self, query: bytes) -> Tuple[bytes, float]:
 		"""Resolve a DNS query via forwarding to a upstream DoH server (GET).
 
 		Params:
 			query - A wireformat DNS query packet.
 
 		Returns:
-			A wireformat DNS answer packet.
+			A wireformat DNS answer packet and rtt sample.
 
 		Notes:
 			Using DNS over HTTPS GET format as described here:
 			https://datatracker.ietf.org/doc/html/rfc8484
 			https://developers.cloudflare.com/1.1.1.1/dns-over-https/wireformat/
 		"""
-		self.queries += 1
-
 		# Encode DNS query into url
 		url = ''.join([self.host, '?dns=', base64.urlsafe_b64encode(query).rstrip(b'=').decode()])
-		rtt = None
 
+		# Send HTTP request to upstream DoH server and wait for the response
+		response = await aio.shield(self.session.get(url))
+
+		# Parse HTTP response
+		response.raise_for_status()
+		answer = response.read()
+		rtt = response.elapsed.total_seconds()
+
+		# Return the DNS answer
+		return (answer, rtt)
+
+	async def aforward_query(self, query: bytes) -> bytes:
+		self.queries += 1
+
+		query = memoryview(query)
+		qid = query[:2]
+
+		# Forward the DNS query to the upstream DoH server
 		try:
-			# Send HTTP request to upstream DoH server and wait for the response
-			response = await self.session.get(url)
+			logging.debug(f'Sending query {qid.hex()} to {self.host} --->')
+			answer, rtt = await self.aforward_post(b''.join([b'\0' * 2, query[2:]]))
 
-			# Parse HTTP response
-			rtt = response.elapsed.total_seconds()
-			response.raise_for_status()
-			answer = response.read()
-
-			# print(f'REQUEST GET {response.request.url} {response.request.headers}')
-			# print(f'{response} {response.http_version} {response.elapsed} -> {response.headers}')
-
-			# Return the DNS answer
+			self.add_rtt_sample(rtt)
 			self.answers += 1
-			return answer
+
+			logging.debug(f'Receiving answer {qid.hex()} from {self.host} ({rtt}) <---')
+			return b''.join([qid, memoryview(answer)[2:]])
 
 		# Raise connection error
 		except (httpx.NetworkError, httpx.RemoteProtocolError):
 			raise ConnectionError(f'DNS query to DoH server {self.host} failed due to network errors')
 
 		# Raise abnormal HTTP status codes
-		except httpx.HTTPStatusError:
-			raise ConnectionError(f'received HTTP error status from DoH server {self.host} ({response.status_code})')
-
-		# Update estimated RTT for this upstream connection
-		finally:
-			if rtt is not None:
-				self.add_rtt_sample(rtt)
-
-	async def aforward_query(self, query: bytes) -> bytes:
-		query = memoryview(query)
-		qid = query[:2]
-		answer = await self.aforward_post(b''.join([b'\0' * 2, query[2:]]))
-		return b''.join([qid, memoryview(answer)[2:]])
+		except httpx.HTTPStatusError as exc:
+			raise ConnectionError(f'received HTTP error status from DoH server {self.host} ({exc.response.status_code})')
 
 	async def aclose(self) -> None:
 		await self.session.aclose()
@@ -255,11 +241,9 @@ class AsyncDnsResolver:
 	"""A class that manages upstream DNS server contexts and resolves DNS queries."""
 
 	DEFAULT_QUERY_TIMEOUT: ClassVar[float] = 3.0
-	MAX_OUTSTANDING_QUERIES: ClassVar[int] = 100
 
 	def __init__(self, upstreams: Iterable[str], context_class: Type[AsyncDnsUpstreamContext]) -> None:
 		self._upstreams = tuple(context_class(upstream) for upstream in upstreams)
-		self._sem = asyncio.BoundedSemaphore(self.MAX_OUTSTANDING_QUERIES)
 
 		if not self._upstreams:
 			raise ValueError('iterable of upstreams must have at least one entry')
@@ -272,13 +256,6 @@ class AsyncDnsResolver:
 		exc_val: Optional[BaseException],
 		exc_tb: Optional[TracebackType]) -> None:
 		await self.aclose()
-
-	def _select_upstream_rtt(self) -> AsyncDnsUpstreamContext:
-		"""Selects a upstream DNS server to forward to (biased towards upstreams with a lower average rtt)."""
-		rtts = tuple(upstream.avg_rtt for upstream in self._upstreams)
-		max_rtt = max(rtts)
-		weights = (max_rtt - rtt + 0.001 for rtt in rtts)
-		return random.choices(self._upstreams, weights=weights)[0]
 
 	@property
 	def queries(self) -> int:
@@ -297,7 +274,7 @@ class AsyncDnsResolver:
 		return f'Statistics for resolver at 0x{id(self)} (avg_rtt: {self.avg_rtt:.3f} s, total_queries: {self.queries}, total_answers: {self.answers})'
 
 	async def aresolve(self, query: bytes, timeout: float = DEFAULT_QUERY_TIMEOUT) -> bytes:
-		"""Resolve a DNS query via forwarding to a upstream DNS server.
+		"""Resolve a DNS query via forwarding to upstream DNS servers.
 
 		Params:
 			query - A wireformat DNS query packet.
@@ -306,25 +283,73 @@ class AsyncDnsResolver:
 		Returns:
 			A wireformat DNS answer packet.
 		"""
-		# Select a upstream server to forward the request to
-		upstream = self._select_upstream_rtt()
+		# Forward the DNS query and return the DNS answer
+		# (perform a staggered race and accept the earliest response)
+		async def astaggered_resolution(upstreams: Sequence[AsyncDnsUpstreamContext], period: float) -> bytes:
+			assert len(upstreams) > 0
 
+			winner: Task = None
+			racers: Set[Task] = set()
+			errors: List[BaseException] = []
+
+			# Wait for the first racer to finish and cleanup exceptions
+			async def await_first_racer(timeout: float = None) -> bool:
+				nonlocal winner
+				nonlocal racers
+				nonlocal errors
+
+				done, racers = await aio.wait(racers, timeout=timeout, return_when=aio.FIRST_COMPLETED)
+
+				for racer in done:
+						error = racer.exception()
+
+						if error is None:
+							winner = racer
+							break
+						else:
+							errors.append(error)
+
+				return winner is not None
+
+			try:
+				for upstream in upstreams:
+					racers.add(aio.create_task(upstream.aforward_query(query)))
+
+					if await await_first_racer(period):
+						return winner.result()
+
+				while racers:
+					if await await_first_racer():
+						return winner.result()
+
+			finally:
+				for loser in racers:
+					loser.cancel()
+
+			def raise_multi_error(errors: Iterable[BaseException]) -> None:
+				class MultiError(*frozenset(type(error) for error in errors)):
+					pass
+
+				raise MultiError
+
+			assert len(errors) == len(upstreams)
+			raise_multi_error(errors)
+
+		# Weighted random shuffle the upstream servers by average latency
+		k = len(self._upstreams)
+		rtts = tuple(upstream.avg_rtt for upstream in self._upstreams)
+		max_rtt = max(rtts)
+		weights = (max_rtt - rtt + 0.001 for rtt in rtts)
+		upstreams = random.choices(self._upstreams, weights=weights, k=k)
+		period = (timeout / 2) / k if timeout is not None else 0.1
+
+		# Forward the DNS query and return the DNS answer
 		try:
-			# Forward the DNS query and return the DNS answer
-			async with self._sem:
-				return await asyncio.wait_for(asyncio.shield(upstream.aforward_query(query)), timeout)
+			return await aio.wait_for(astaggered_resolution(upstreams, period), timeout)
 
 		# Raise timeout error
-		except asyncio.TimeoutError:
-			upstream.add_rtt_sample(timeout + 1.0)
+		except aio.TimeoutError:
 			raise TimeoutError(f'DNS query expired and was cancelled')
-
-		# Log resolver info periodically
-		finally:
-			if self.queries % 1000 == 0:
-				logging.info(self.get_stats())
-				for upstream in self._upstreams:
-					logging.info(upstream.get_stats())
 
 	async def aclose(self) -> None:
 		"""Close all upstream DoH server connections."""
@@ -332,31 +357,49 @@ class AsyncDnsResolver:
 			await upstream.aclose()
 
 
-class UdpResolverProtocol(asyncio.DatagramProtocol):
+class UdpResolverProtocol(aio.DatagramProtocol):
 	"""Protocol for serving UDP DNS requests via a DnsResolver instance."""
 
 	def __init__(self, resolver: AsyncDnsResolver) -> None:
 		self.resolver = resolver
+		self.buffer = []
+		self.worker = None
 
-	def connection_made(self, transport: asyncio.DatagramTransport) -> None:
+	def connection_made(self, transport: DatagramTransport) -> None:
 		self.transport = transport
 
 	def datagram_received(self, data: bytes, peer: Tuple[str, int]) -> None:
-		logging.info(f'Got UDP DNS query from {peer}')
+		logging.debug(f'Got UDP DNS query from {peer}')
 
-		# Schedule packet processing task
-		asyncio.create_task(self.ahandle_query(peer, data))
+		# Add query to buffer
+		self.buffer.append((peer, data))
 
-	async def ahandle_query(self, peer: Tuple[str, int], query: bytes) -> None:
-		try:
-			# Resolve DNS query
-			answer = await self.resolver.aresolve(query)
+		# Schedule query processing task if necessary
+		if self.worker is None:
+			self.worker = aio.create_task(self.ahandle_queries())
 
-			# Send DNS answer to the peer
-			self.transport.sendto(answer, peer)
+	async def ahandle_queries(self) -> None:
+		while self.buffer:
+			tasks = set(aio.create_task(self.ahandle_query(peer, query)) for peer, query in self.buffer)
 
-		except (TimeoutError, ConnectionError) as exc:
-			logging.warning(f'UDP DNS query resolution encountered an error [{exc}]')
+			del self.buffer[:]
+
+			while tasks:
+				done, tasks = await aio.wait(tasks, timeout=0.05)
+
+				for task in done:
+					error = task.exception()
+
+					if error is None:
+						peer, answer = task.result()
+						self.transport.sendto(answer, peer)
+					else:
+						logging.warning(f'UDP DNS query resolution encountered an error - {error!r}')
+
+		self.worker = None
+
+	async def ahandle_query(self, peer: Tuple[str, int], query: bytes) -> Tuple[Tuple[str, int], bytes]:
+		return (peer, await self.resolver.aresolve(query))
 
 
 class TcpResolverProtocol:
@@ -365,12 +408,12 @@ class TcpResolverProtocol:
 	def __init__(self, resolver: AsyncDnsResolver) -> None:
 		self.resolver = resolver
 
-	async def ahandle_peer(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+	async def ahandle_peer(self, reader: StreamReader, writer: StreamWriter) -> None:
 		"""Read all DNS queries from the peer stream and schedule their resolution via a DnsResolver instance."""
-		tasks = []
-		wlock = asyncio.Lock()
+		tasks: Union[List[Task], Set[Task]] = []
+		wlock = aio.Lock()
 
-		logging.info(f'Got TCP DNS query stream from {writer.transport.get_extra_info("peername")}')
+		logging.debug(f'Got TCP DNS query stream from {writer.transport.get_extra_info("peername")}')
 
 		while True:
 			# Parse a DNS query packet off of the wire
@@ -379,19 +422,21 @@ class TcpResolverProtocol:
 				query = await reader.readexactly(query_size)
 
 			# Check if our peer has finished writing to the stream
-			except asyncio.IncompleteReadError:
+			except aio.IncompleteReadError:
 				break
 
 			# Schedule the processing of the query
-			tasks.append(asyncio.create_task(self.ahandle_query(writer, wlock, query)))
+			tasks.append(aio.create_task(self.ahandle_query(writer, wlock, query)))
 
 		# Wait for all scheduled query processing to finish
-		for task in asyncio.as_completed(tasks):
-			try:
-				await task
+		while tasks:
+			done, tasks = await aio.wait(tasks, return_when=aio.FIRST_COMPLETED)
 
-			except (TimeoutError, ConnectionError) as exc:
-				logging.warning(f'TCP DNS query resolution encountered an error [{exc}]')
+			for task in done:
+				error = task.exception()
+
+				if error is not None:
+					logging.warning(f'TCP DNS query resolution encountered an error - {error!r}')
 
 		if not writer.is_closing():
 			# Indicate we are done writing to the stream
@@ -402,13 +447,16 @@ class TcpResolverProtocol:
 			writer.close()
 			await writer.wait_closed()
 
-	async def ahandle_query(self, writer: asyncio.StreamWriter, wlock: asyncio.Lock, query: bytes) -> None:
+	async def ahandle_query(self, writer: StreamWriter, wlock: Lock, query: bytes) -> None:
 		"""Resolve a DNS query and write the DNS answer to the peer stream."""
 		if writer.is_closing():
 			return
 
 		# Resolve DNS query
 		answer = await self.resolver.aresolve(query)
+
+		if writer.is_closing():
+			return
 
 		# Create the DNS answer packet
 		answer_size = len(answer).to_bytes(2, 'big')
@@ -420,6 +468,10 @@ class TcpResolverProtocol:
 				return
 
 			await writer.drain()
+
+			if writer.is_closing():
+				return
+
 			writer.write(answer)
 
 
@@ -434,13 +486,16 @@ if __name__ == '__main__':
 						help='upstream servers to forward DNS queries and requests to (default: %(default)s)')
 	parser.add_argument('-t', '--tcp', action='store_true', default=False,
 						help='serve TCP based queries and requests along with UDP (default: %(default)s)')
+	parser.add_argument('-f', '--file', default=None,
+						help='file to store logging output to (default: %(default)s)')
 	parser.add_argument('-d', '--debug', action='store_true', default=False,
 						help='enable debugging on the internal asyncio event loop (default: %(default)s)')
 	args = parser.parse_args()
 
 	# Setup logging
-	logging.basicConfig(level='INFO', format='[%(levelname)s] %(message)s')
+	log_level = 'DEBUG' if args.debug else 'INFO'
+	logging.basicConfig(level=log_level, filename=args.file, filemode='w', format='(%(asctime)s)[%(levelname)s] %(message)s')
 	logging.info('Starting DNS over HTTPS forwarder')
 	logging.info('Args: %r' % (vars(args)))
 
-	asyncio.run(main(args), debug=args.debug)
+	aio.run(main(args), debug=args.debug)
